@@ -559,6 +559,20 @@ defmodule Rollbax.LoggerTest do
         refute_receive {:api_request, _body}
       end)
     end
+
+    test "what the supervisor of the tasks posting the reports logs is not reported" do
+      %{task_supervisor: task_supervisor} = :sys.get_state(Rollbax.Client)
+
+      capture_log(fn ->
+        # Runs in the supervisor, as its report of a task that was killed does.
+        :sys.replace_state(task_supervisor, fn state ->
+          Logger.error("Child :undefined of Supervisor #{inspect(self())} terminated")
+          state
+        end)
+
+        refute_receive {:api_request, _body}
+      end)
+    end
   end
 
   @tag reporters: [Rollbax.Reporter.Silencing]

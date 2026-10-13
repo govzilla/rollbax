@@ -35,7 +35,8 @@ defmodule Rollbax.Logger do
   with a `Rollbax.Reporter.Silencing` reporter that doesn't report anything it receives. For examples on
   how to provide your own reporters, look at the source for `Rollbax.Reporter.Standard`.
 
-  Events logged on another node, and the ones Rollbax logs itself, never reach the reporters.
+  Events logged on another node never reach the reporters. Neither do the ones Rollbax logs
+  itself, nor what the supervisor of the tasks posting its reports logs when one of them dies.
 
   ## Configuration
 
@@ -88,6 +89,7 @@ defmodule Rollbax.Logger do
 
   defp reportable?(%{rollbax: false}), do: false
   defp reportable?(%{gl: gl}) when node(gl) != node(), do: false
+  defp reportable?(%{pid: pid}) when is_pid(pid), do: not Rollbax.Client.own_process?(pid)
   defp reportable?(_meta), do: true
 
   defp run_reporters([reporter | rest], level, event) do

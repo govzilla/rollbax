@@ -21,6 +21,7 @@ defmodule Rollbax.Client do
   @default_max_concurrency 20
   @default_max_queue 1_000
   @max_queue_key {__MODULE__, :max_queue}
+  @own_processes_key {__MODULE__, :own_processes}
   @default_report_timeout 60_000
   @default_flush_timeout 5_000
   @max_recent 1_000
@@ -238,6 +239,16 @@ defmodule Rollbax.Client do
     end
   end
 
+  # The client and the supervisor of the tasks posting its reports. What they log is about
+  # a report that failed, and reporting that would fail the same way, without end.
+  @spec own_process?(pid) :: boolean
+  def own_process?(pid) when is_pid(pid) do
+    case :persistent_term.get(@own_processes_key, nil) do
+      {client, task_supervisor} -> pid == client or pid == task_supervisor
+      nil -> false
+    end
+  end
+
   ## GenServer callbacks
 
   @impl true
@@ -248,6 +259,8 @@ defmodule Rollbax.Client do
     {:ok, task_supervisor} = Task.Supervisor.start_link()
     # Read by emit/5, which runs in the process reporting.
     :persistent_term.put(@max_queue_key, state.max_queue)
+    # Read by own_process?/1, which runs in the process logging.
+    :persistent_term.put(@own_processes_key, {self(), task_supervisor})
     {:ok, %{state | task_supervisor: task_supervisor}}
   end
 
