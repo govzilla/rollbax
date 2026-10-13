@@ -301,6 +301,103 @@ defmodule Rollbax.LoggerTest do
     purge_module(MyModule)
   end
 
+  describe "from Elixir 1.19 on, what identifies the process that crashed" do
+    @describetag skip: Version.match?(System.version(), "< 1.19.0") and "needs Elixir 1.19"
+
+    test "is sent for a GenServer, without its state" do
+      defmodule Elixir.MyGenServer do
+        use GenServer
+
+        def init(args), do: {:ok, args}
+        def handle_cast(:raise, _state), do: raise("oops")
+      end
+
+      {:ok, gen_server} = GenServer.start(MyGenServer, %{secret: "s3cr3t"}, name: :my_gen_server)
+
+      custom =
+        quietly(fn ->
+          GenServer.cast(gen_server, :raise)
+          assert_performed_request()["data"]["custom"]
+        end)
+
+      assert %{"name" => ":my_gen_server", "last_message" => ~s({:"$gen_cast", :raise})} = custom
+      refute Map.has_key?(custom, "state")
+      refute custom["log"] =~ "s3cr3t"
+    after
+      purge_module(MyGenServer)
+    end
+
+    test "is sent for a task" do
+      defmodule Elixir.MyModule do
+        def raise_error(message), do: raise(message)
+      end
+
+      custom =
+        quietly(fn ->
+          {:ok, task} = Task.start(MyModule, :raise_error, ["my message"])
+          custom = assert_performed_request()["data"]["custom"]
+          assert custom["name"] == inspect(task)
+          custom
+        end)
+
+      assert %{
+               "function" => "&MyModule.raise_error/1",
+               "arguments" => ~s(["my message"]),
+               "started_from" => started_from
+             } = custom
+
+      assert started_from == inspect(self())
+    after
+      purge_module(MyModule)
+    end
+
+    test "is sent for a state machine, with the name of its state and not its data" do
+      defmodule Elixir.MyStateMachine do
+        @behaviour :gen_statem
+
+        def callback_mode(), do: :state_functions
+        def init(data), do: {:ok, :idle, data}
+        def idle(:cast, :raise_error, _data), do: raise("oops")
+      end
+
+      {:ok, state_machine} = :gen_statem.start(MyStateMachine, %{secret: "s3cr3t"}, [])
+
+      custom =
+        quietly(fn ->
+          :gen_statem.cast(state_machine, :raise_error)
+          assert_performed_request()["data"]["custom"]
+        end)
+
+      assert %{"name" => name, "state" => ":idle", "last_event" => "{:cast, :raise_error}"} =
+               custom
+
+      assert name == inspect(state_machine)
+    after
+      purge_module(MyStateMachine)
+    end
+
+    test "is cut when it is long" do
+      defmodule Elixir.MyGenServer do
+        use GenServer
+
+        def init(args), do: {:ok, args}
+        def handle_cast({:raise, _payload}, _state), do: raise("oops")
+      end
+
+      {:ok, gen_server} = GenServer.start(MyGenServer, {})
+
+      last_message =
+        quietly(fn ->
+          GenServer.cast(gen_server, {:raise, String.duplicate("a", 5_000)})
+          assert_performed_request()["data"]["custom"]["last_message"]
+        end)
+
+      assert byte_size(last_message) == 1_000 + byte_size(" (truncated)")
+    after
+      purge_module(MyGenServer)
+    end
+  end
+
   test "a crash a library logs with its reason is reported under the exception's name" do
     capture_log(fn ->
       stacktrace = [{MyLibrary, :serve, 1, [file: ~c"lib/my_library.ex", line: 7]}]
