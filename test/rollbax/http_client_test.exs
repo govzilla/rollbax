@@ -232,19 +232,32 @@ defmodule Rollbax.HTTPClientTest do
     end
   end
 
-  test "the Req client reads the headers Req returns as plain values" do
-    Application.put_env(:req, :legacy_headers_as_lists, true)
-    on_exit(fn -> Application.delete_env(:req, :legacy_headers_as_lists) end)
+  test "the Req client reads headers with a list of values or with a single one" do
+    assert Rollbax.HTTPClient.Req.headers_to_list(%{"a" => ["1", "2"], "b" => ["3"]}) ==
+             [{"a", "1"}, {"a", "2"}, {"b", "3"}]
 
+    assert Rollbax.HTTPClient.Req.headers_to_list([{"a", "1"}, {"b", "3"}]) ==
+             [{"a", "1"}, {"b", "3"}]
+  end
+
+  test "the Req client sends the headers configured for it along with its own" do
     {:ok, _server} = RollbarAPI.start(self(), 4005)
     on_exit(&RollbarAPI.stop/0)
 
-    body = Jason.encode!(%{"data" => %{"custom" => %{"rate_limit_seconds" => "7"}}})
+    body = Jason.encode!(%{"data" => %{"custom" => %{}}})
+    options = [headers: [{"x-gateway-key", "secret"}]]
 
-    assert {:ok, 429, headers, "{}"} =
-             Rollbax.HTTPClient.Req.post("http://localhost:4005", [], body, [])
+    assert {:ok, 200, _headers, _body} =
+             Rollbax.HTTPClient.Req.post(
+               "http://localhost:4005",
+               [{"content-type", "application/json"}],
+               body,
+               options
+             )
 
-    assert {"x-rate-limit-remaining-seconds", "7"} in headers
+    assert_receive {:api_request_headers, headers}
+    assert {"x-gateway-key", "secret"} in headers
+    assert {"content-type", "application/json"} in headers
   end
 
   test "the Req client never decodes the body, whatever its options say" do
@@ -273,6 +286,43 @@ defmodule Rollbax.HTTPClientTest do
     end)
 
     assert {:error, {:not_found, Rollbax.Logger}} = :logger.get_handler_config(Rollbax.Logger)
+  end
+
+  describe "the :report_timeout configuration" do
+    test "defaults to a minute" do
+      assert Client.report_timeout(nil) == 60_000
+    end
+
+    test "takes a positive number of milliseconds" do
+      assert Client.report_timeout(250) == 250
+    end
+
+    for value <- [0, -1, "100", :infinity] do
+      test "refuses #{inspect(value)}" do
+        assert_raise ArgumentError, ~r/:report_timeout must be a positive number/, fn ->
+          Client.report_timeout(unquote(value))
+        end
+      end
+    end
+  end
+
+  test "a failure that only looks like an exception is logged" do
+    start_client(answer: {:error, %{__exception__: true}})
+    assert capture_log(&emit/0) =~ "[error] (Rollbax) connection error: %{__exception__: true}"
+  end
+
+  test "abandoning a report does not wait for its task" do
+    client = start_client([hold: true], report_timeout: 50)
+
+    capture_log(fn ->
+      :ok = emit()
+      assert_receive {:posted, task, _url, _headers, _body}
+      monitor = Process.monitor(task)
+      assert_receive {:DOWN, ^monitor, :process, ^task, :killed}
+    end)
+
+    {microseconds, _state} = :timer.tc(fn -> :sys.get_state(client) end)
+    assert microseconds < 1_000_000
   end
 
   test "the application refuses to start with the removed :proxy option" do

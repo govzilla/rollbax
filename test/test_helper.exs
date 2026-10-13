@@ -73,7 +73,7 @@ defmodule ExUnit.RollbaxCase do
         :ok
 
       attempts == 0 ->
-        :ok
+        raise "the Rollbax client still had reports to handle after two seconds"
 
       true ->
         Process.sleep(20)
@@ -128,9 +128,12 @@ defmodule RollbarAPI do
   def call(%Conn{method: "POST"} = conn, test) do
     {:ok, body, conn} = read_body(conn)
     Process.sleep(30)
+    send(test, {:api_request_headers, conn.req_headers})
     send(test, {:api_request, body})
 
     custom = Jason.decode!(body)["data"]["custom"]
+
+    conn = put_resp_content_type(conn, "application/json")
 
     cond do
       custom["return_error?"] ->

@@ -96,6 +96,7 @@ defmodule Rollbax do
 
     # Fails here, at startup, when the client cannot be used.
     {_module, _options} = Rollbax.Client.http_client(config[:http_client])
+    _timeout = Rollbax.Client.report_timeout(config[:report_timeout])
 
     children = [
       {Rollbax.Client, config}

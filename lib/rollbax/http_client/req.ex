@@ -24,6 +24,8 @@ if Code.ensure_loaded?(Req) do
     @impl true
     def post(url, headers, body, options)
         when is_binary(url) and is_list(headers) and is_list(options) do
+      {configured_headers, options} = Keyword.pop(options, :headers, [])
+
       # Rollbax reads the body itself, so it is never decoded, whatever the options say.
       request =
         [retry: false, redirect: false]
@@ -31,22 +33,24 @@ if Code.ensure_loaded?(Req) do
         |> Keyword.merge(
           method: :post,
           url: url,
-          headers: headers,
+          headers: Enum.to_list(configured_headers) ++ headers,
           body: body,
           decode_body: false
         )
 
       case Req.request(request) do
         {:ok, %Req.Response{} = response} ->
-          {:ok, response.status, response_headers(response), response.body}
+          {:ok, response.status, headers_to_list(response.headers), response.body}
 
         {:error, exception} ->
           {:error, exception}
       end
     end
 
-    defp response_headers(%Req.Response{headers: headers}) do
-      # A list of values per header, or a single one with `legacy_headers_as_lists`.
+    # Req returns a list of values per header, or a single one when it is compiled with
+    # `legacy_headers_as_lists`.
+    @doc false
+    def headers_to_list(headers) do
       for {name, values} <- headers, value <- List.wrap(values), do: {name, value}
     end
   end

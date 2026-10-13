@@ -47,7 +47,7 @@ defmodule Rollbax.Client do
       url: config[:api_endpoint],
       enabled: config[:enabled],
       http_client: http_client(config[:http_client]),
-      report_timeout: config[:report_timeout] || @default_report_timeout
+      report_timeout: report_timeout(config[:report_timeout])
     }
 
     GenServer.start_link(__MODULE__, state, name: @name)
@@ -79,6 +79,17 @@ defmodule Rollbax.Client do
           ":http_client must be a module or a {module, options} tuple, got: #{inspect(other)}"
   end
 
+  @doc """
+  Returns the `:report_timeout` configuration, in milliseconds.
+  """
+  def report_timeout(nil), do: @default_report_timeout
+  def report_timeout(timeout) when is_integer(timeout) and timeout > 0, do: timeout
+
+  def report_timeout(other) do
+    raise ArgumentError,
+          ":report_timeout must be a positive number of milliseconds, got: #{inspect(other)}"
+  end
+
   defp http_client_not_loaded_message(Rollbax.HTTPClient.Req) do
     "the default :http_client, Rollbax.HTTPClient.Req, needs the :req dependency. " <>
       ~s(Add {:req, "~> 0.5"} to your dependencies or configure another :http_client)
@@ -93,7 +104,8 @@ defmodule Rollbax.Client do
              is_map(custom) and is_map(occurrence_data) do
     if pid = Process.whereis(@name) do
       # In a storm of errors the reports that would only pile up in the mailbox are dropped
-      # here, before they are copied to it.
+      # here, before they are copied to it. Callers racing each other may overshoot the
+      # limit by a few reports.
       if mailbox_has_room?(pid) do
         event = {Atom.to_string(level), timestamp, body, custom, occurrence_data}
         GenServer.cast(pid, {:emit, event})
@@ -185,7 +197,8 @@ defmodule Rollbax.Client do
       %{^ref => {pid, _deadline_timer}} ->
         Logger.error("(Rollbax) connection error: no answer in #{state.report_timeout} ms")
         Process.demonitor(ref, [:flush])
-        _ = Task.Supervisor.terminate_child(state.task_supervisor, pid)
+        # Killed outright: waiting for the task to shut down would hold every other report.
+        Process.exit(pid, :kill)
         {:noreply, post_waiting(%{state | in_flight: Map.delete(state.in_flight, ref)})}
 
       %{} ->
@@ -334,7 +347,7 @@ defmodule Rollbax.Client do
     end
   end
 
-  defp format_error(%{__exception__: true} = exception), do: Exception.message(exception)
+  defp format_error(exception) when is_exception(exception), do: Exception.message(exception)
   defp format_error(reason), do: inspect(reason)
 
   # Several rate limited responses may arrive in a row. Each one replaces the timer of the
