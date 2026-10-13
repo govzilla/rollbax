@@ -291,6 +291,17 @@ defmodule Rollbax.HTTPClientTest do
   end
 
   describe "when the client stops" do
+    # The client is flushing once it sits in flush/2, which only terminate/2 calls.
+    defp await_flushing(client, attempts \\ 100) do
+      {:current_stacktrace, stacktrace} = Process.info(client, :current_stacktrace)
+
+      cond do
+        Enum.any?(stacktrace, &match?({Rollbax.Client, :flush, 2, _location}, &1)) -> :ok
+        attempts == 0 -> flunk("the client did not start flushing")
+        true -> Process.sleep(10) && await_flushing(client, attempts - 1)
+      end
+    end
+
     test "the reports it holds are given the flush timeout to leave" do
       client = start_client([hold: true], max_concurrency: 1, flush_timeout: 2_000)
       :ok = emit()
@@ -298,6 +309,7 @@ defmodule Rollbax.HTTPClientTest do
 
       assert_receive {:posted, first, _url, _headers, _body}
       stopping = Task.async(fn -> GenServer.stop(client) end)
+      await_flushing(client)
 
       send(first, :answer)
       assert_receive {:posted, second, _url, _headers, _body}
@@ -306,21 +318,57 @@ defmodule Rollbax.HTTPClientTest do
       assert Task.await(stopping) == :ok
     end
 
-    test "it gives up on them at the flush timeout and says how many were left" do
+    test "a report still in its mailbox is sent too" do
+      client = start_client([], flush_timeout: 2_000)
+
+      :sys.suspend(client)
+      :ok = emit()
+      :ok = GenServer.stop(client)
+
+      assert_receive {:posted, _task, _url, _headers, _body}
+    end
+
+    test "it gives up on them at the flush timeout, stops them and says how many were left" do
       client = start_client([hold: true], max_concurrency: 1, flush_timeout: 100)
 
       log =
         ExUnit.CaptureIO.capture_io(:user, fn ->
           :ok = emit()
           :ok = emit()
-          assert_receive {:posted, _task, _url, _headers, _body}
+          assert_receive {:posted, task, _url, _headers, _body}
+          monitor = Process.monitor(task)
+
+          {microseconds, :ok} = :timer.tc(fn -> GenServer.stop(client) end)
+          assert microseconds < 1_000_000
+          assert_receive {:DOWN, ^monitor, :process, ^task, :killed}
+          Logger.flush()
+        end)
+
+      assert log =~ "[error] (Rollbax) 2 reports were not sent before the client stopped"
+    end
+
+    test "it does not go past the flush timeout while reports keep arriving" do
+      client =
+        start_client([],
+          flush_timeout: 100,
+          before_send: fn data ->
+            Process.sleep(30)
+            data
+          end
+        )
+
+      # Suspended, the client takes the fifty reports only once it is told to stop.
+      log =
+        ExUnit.CaptureIO.capture_io(:user, fn ->
+          :sys.suspend(client)
+          Enum.each(1..50, fn _ -> :ok = emit() end)
 
           {microseconds, :ok} = :timer.tc(fn -> GenServer.stop(client) end)
           assert microseconds < 1_000_000
           Logger.flush()
         end)
 
-      assert log =~ "[error] (Rollbax) 2 reports were not sent before the client stopped"
+      assert log =~ ~r/\(Rollbax\) 4\d reports were not sent before the client stopped/
     end
 
     test "it does not wait when there is nothing left to send" do

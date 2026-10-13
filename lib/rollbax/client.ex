@@ -259,8 +259,12 @@ defmodule Rollbax.Client do
   @impl true
   def terminate(_reason, %__MODULE__{enabled: true} = state) do
     deadline = System.monotonic_time(:millisecond) + state.flush_timeout
-    state = flush(state, deadline)
-    pending = map_size(state.in_flight) + state.waiting_count
+    state = state |> flush(deadline) |> settle()
+
+    # What did not leave in time is given up on: the tasks still posting are stopped, and
+    # the reports nobody got to are counted with the rest.
+    Enum.each(state.in_flight, fn {_ref, {pid, _deadline_timer}} -> Process.exit(pid, :kill) end)
+    pending = map_size(state.in_flight) + state.waiting_count + discard_emitted(0)
 
     if pending > 0 do
       Logger.error("(Rollbax) #{pending} reports were not sent before the client stopped")
@@ -271,23 +275,55 @@ defmodule Rollbax.Client do
 
   def terminate(_reason, _state), do: :ok
 
-  defp flush(%__MODULE__{in_flight: in_flight, waiting_count: 0} = state, _deadline)
-       when map_size(in_flight) == 0 do
-    state
+  defp flush(%__MODULE__{} = state, deadline) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    cond do
+      remaining <= 0 ->
+        state
+
+      map_size(state.in_flight) == 0 and state.waiting_count == 0 ->
+        # Nothing is on its way: only a report still in the mailbox keeps the flush going.
+        receive do
+          {:"$gen_cast", {:emit, event}} -> state |> emitted(event) |> flush(deadline)
+        after
+          0 -> state
+        end
+
+      true ->
+        receive do
+          {:"$gen_cast", {:emit, event}} ->
+            state |> emitted(event) |> flush(deadline)
+
+          message ->
+            case answered(state, message) do
+              {:ok, state} -> flush(state, deadline)
+              :unknown -> flush(state, deadline)
+            end
+        after
+          remaining -> state
+        end
+    end
   end
 
-  defp flush(%__MODULE__{} = state, deadline) do
+  # Takes the answers that arrived while the flush was busy with something else, so the
+  # reports they belong to are not counted as left behind.
+  defp settle(%__MODULE__{} = state) do
     receive do
-      {:"$gen_cast", {:emit, event}} ->
-        state |> emitted(event) |> flush(deadline)
-
-      message ->
-        case answered(state, message) do
-          {:ok, state} -> flush(state, deadline)
-          :unknown -> flush(state, deadline)
-        end
+      {ref, response} when is_reference(ref) and is_map_key(state.in_flight, ref) ->
+        {:ok, state} = pop_in_flight(state, ref)
+        Process.demonitor(ref, [:flush])
+        state |> handle_response(response) |> settle()
     after
-      max(deadline - System.monotonic_time(:millisecond), 0) -> state
+      0 -> state
+    end
+  end
+
+  defp discard_emitted(count) do
+    receive do
+      {:"$gen_cast", {:emit, _event}} -> discard_emitted(count + 1)
+    after
+      0 -> count
     end
   end
 
