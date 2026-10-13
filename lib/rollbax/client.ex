@@ -21,6 +21,7 @@ defmodule Rollbax.Client do
   @default_max_queue 1_000
   @max_queue_key {__MODULE__, :max_queue}
   @default_report_timeout 60_000
+  @default_flush_timeout 5_000
   # The longest wait an Erlang timer takes, in milliseconds.
   @max_timer 4_294_967_295
   # The longest Rollbar may ask us to hold reports for, in seconds.
@@ -40,12 +41,22 @@ defmodule Rollbax.Client do
     max_concurrency: @default_max_concurrency,
     max_queue: @default_max_queue,
     before_send: nil,
+    flush_timeout: @default_flush_timeout,
     in_flight: %{},
     waiting: :queue.new(),
     waiting_count: 0
   ]
 
   ## Public API
+
+  # The supervisor waits for the flush before it gives up on the client.
+  def child_spec(config) do
+    %{
+      id: __MODULE__,
+      start: {__MODULE__, :start_link, [config]},
+      shutdown: flush_timeout(config[:flush_timeout]) + 1_000
+    }
+  end
 
   def start_link(config) do
     state = %__MODULE__{
@@ -63,7 +74,8 @@ defmodule Rollbax.Client do
       max_concurrency:
         limit(:max_concurrency, config[:max_concurrency], @default_max_concurrency),
       max_queue: limit(:max_queue, config[:max_queue], @default_max_queue),
-      before_send: before_send(config[:before_send])
+      before_send: before_send(config[:before_send]),
+      flush_timeout: flush_timeout(config[:flush_timeout])
     }
 
     GenServer.start_link(__MODULE__, state, name: @name)
@@ -93,6 +105,20 @@ defmodule Rollbax.Client do
   def http_client(other) do
     raise ArgumentError,
           ":http_client must be a module or a {module, options} tuple, got: #{inspect(other)}"
+  end
+
+  @doc """
+  Returns the `:flush_timeout` configuration, in milliseconds.
+  """
+  def flush_timeout(nil), do: @default_flush_timeout
+
+  def flush_timeout(timeout) when is_integer(timeout) and timeout in 0..@max_timer//1,
+    do: timeout
+
+  def flush_timeout(other) do
+    raise ArgumentError,
+          ":flush_timeout must be a number of milliseconds between 0 and #{@max_timer}, " <>
+            "got: #{inspect(other)}"
   end
 
   @doc """
@@ -196,6 +222,8 @@ defmodule Rollbax.Client do
   @impl true
   def init(%__MODULE__{} = state) do
     Logger.metadata(rollbax: false)
+    # So that terminate/2 runs when the supervisor stops the client.
+    Process.flag(:trap_exit, true)
     {:ok, task_supervisor} = Task.Supervisor.start_link()
     # Read by emit/5, which runs in the process reporting.
     :persistent_term.put(@max_queue_key, state.max_queue)
@@ -203,27 +231,87 @@ defmodule Rollbax.Client do
   end
 
   @impl true
-  def handle_cast({:emit, _event}, %{rate_limited?: true} = state) do
+  def handle_cast({:emit, event}, %__MODULE__{} = state) do
+    {:noreply, emitted(state, event)}
+  end
+
+  @impl true
+  def handle_info({:EXIT, pid, reason}, %__MODULE__{task_supervisor: pid} = state) do
+    {:stop, reason, state}
+  end
+
+  def handle_info({:EXIT, _pid, _reason}, state) do
+    {:noreply, state}
+  end
+
+  def handle_info(message, %__MODULE__{} = state) do
+    case answered(state, message) do
+      {:ok, state} ->
+        {:noreply, state}
+
+      :unknown ->
+        Logger.info("(Rollbax) unexpected message: #{inspect(message)}")
+        {:noreply, state}
+    end
+  end
+
+  # Before the client stops it gives the reports it still holds the chance to leave.
+  @impl true
+  def terminate(_reason, %__MODULE__{enabled: true} = state) do
+    deadline = System.monotonic_time(:millisecond) + state.flush_timeout
+    state = flush(state, deadline)
+    pending = map_size(state.in_flight) + state.waiting_count
+
+    if pending > 0 do
+      Logger.error("(Rollbax) #{pending} reports were not sent before the client stopped")
+    end
+
+    :ok
+  end
+
+  def terminate(_reason, _state), do: :ok
+
+  defp flush(%__MODULE__{in_flight: in_flight, waiting_count: 0} = state, _deadline)
+       when map_size(in_flight) == 0 do
+    state
+  end
+
+  defp flush(%__MODULE__{} = state, deadline) do
+    receive do
+      {:"$gen_cast", {:emit, event}} ->
+        state |> emitted(event) |> flush(deadline)
+
+      message ->
+        case answered(state, message) do
+          {:ok, state} -> flush(state, deadline)
+          :unknown -> flush(state, deadline)
+        end
+    after
+      max(deadline - System.monotonic_time(:millisecond), 0) -> state
+    end
+  end
+
+  ## What the client does with a report and with the answers to the ones it posted
+
+  defp emitted(%__MODULE__{rate_limited?: true} = state, _event) do
     Logger.info("(Rollbax) ignored report due to rate limiting")
-    {:noreply, state}
+    state
   end
 
-  def handle_cast({:emit, _event}, %{enabled: false} = state) do
-    {:noreply, state}
-  end
+  defp emitted(%__MODULE__{enabled: false} = state, _event), do: state
 
-  def handle_cast({:emit, event}, %{enabled: :log} = state) do
+  defp emitted(%__MODULE__{enabled: :log} = state, event) do
     Logger.info(["(Rollbax) registered report.\n", event_to_chardata(event)])
-    {:noreply, state}
+    state
   end
 
-  def handle_cast({:emit, event}, %{enabled: true} = state) do
+  defp emitted(%__MODULE__{enabled: true} = state, event) do
     with {:ok, item} <- compose(state.draft, event, state.before_send),
          {:ok, payload} <- Jason.encode_to_iodata(item) do
-      {:noreply, post_or_enqueue(payload, state)}
+      post_or_enqueue(payload, state)
     else
       :drop ->
-        {:noreply, state}
+        state
 
       {:error, exception} ->
         Logger.error([
@@ -234,63 +322,56 @@ defmodule Rollbax.Client do
           event_to_chardata(event)
         ])
 
-        {:noreply, state}
+        state
     end
   end
 
-  @impl true
-  def handle_info({ref, response}, %__MODULE__{} = state) when is_reference(ref) do
+  defp answered(%__MODULE__{} = state, {ref, response}) when is_reference(ref) do
     case pop_in_flight(state, ref) do
       {:ok, state} ->
         Process.demonitor(ref, [:flush])
-        {:noreply, state |> handle_response(response) |> post_waiting()}
+        {:ok, state |> handle_response(response) |> post_waiting()}
 
       :error ->
-        {:noreply, state}
+        {:ok, state}
     end
   end
 
-  def handle_info({:DOWN, ref, :process, _pid, reason}, %__MODULE__{} = state) do
+  defp answered(%__MODULE__{} = state, {:DOWN, ref, :process, _pid, reason}) do
     case pop_in_flight(state, ref) do
       {:ok, state} ->
         Logger.error("(Rollbax) the task posting a report exited: #{inspect(reason)}")
-        {:noreply, post_waiting(state)}
+        {:ok, post_waiting(state)}
 
       :error ->
-        {:noreply, state}
+        {:ok, state}
     end
   end
 
-  def handle_info({:request_deadline, ref}, %__MODULE__{} = state) do
+  defp answered(%__MODULE__{} = state, {:request_deadline, ref}) do
     case state.in_flight do
       %{^ref => {pid, _deadline_timer}} ->
         Logger.error("(Rollbax) connection error: no answer in #{state.report_timeout} ms")
         Process.demonitor(ref, [:flush])
         # Killed outright: waiting for the task to shut down would hold every other report.
         Process.exit(pid, :kill)
-        {:noreply, post_waiting(%{state | in_flight: Map.delete(state.in_flight, ref)})}
+        {:ok, post_waiting(%{state | in_flight: Map.delete(state.in_flight, ref)})}
 
       %{} ->
-        {:noreply, state}
+        {:ok, state}
     end
   end
 
   # Only the timer of the latest rate limit lifts it.
-  def handle_info(
-        {:lift_rate_limiting, timer_id},
-        %__MODULE__{rate_limit_timer: {timer_id, _}} = state
-      ) do
-    {:noreply, %{state | rate_limited?: false, rate_limit_timer: nil}}
+  defp answered(
+         %__MODULE__{rate_limit_timer: {timer_id, _}} = state,
+         {:lift_rate_limiting, timer_id}
+       ) do
+    {:ok, %{state | rate_limited?: false, rate_limit_timer: nil}}
   end
 
-  def handle_info({:lift_rate_limiting, _timer_id}, state) do
-    {:noreply, state}
-  end
-
-  def handle_info(message, state) do
-    Logger.info("(Rollbax) unexpected message: #{inspect(message)}")
-    {:noreply, state}
-  end
+  defp answered(%__MODULE__{} = state, {:lift_rate_limiting, _timer_id}), do: {:ok, state}
+  defp answered(%__MODULE__{}, _message), do: :unknown
 
   ## Helper functions
 

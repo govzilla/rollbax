@@ -29,7 +29,7 @@ defmodule ExUnit.RollbaxCase do
          enabled: true,
          custom: custom,
          http_client: http_client
-       ] ++ extra}
+       ] ++ Keyword.put_new(extra, :flush_timeout, 0)}
     )
   end
 

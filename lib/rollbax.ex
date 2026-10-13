@@ -50,6 +50,9 @@ defmodule Rollbax do
       report right before it is sent, to redact it or to keep it from being sent. See
       "Redacting reports" below.
 
+    * `:flush_timeout` - (milliseconds) how long the reports still waiting or being posted
+      are given to leave when the application stops. `0` stops at once. Defaults to `5_000`.
+
     * `:max_concurrency` - (positive integer) how many reports are posted at once. Defaults
       to `20`.
 
@@ -139,6 +142,7 @@ defmodule Rollbax do
     _limit = Rollbax.Client.limit(:max_queue, config[:max_queue], nil)
     _before_send = Rollbax.Client.before_send(config[:before_send])
     _code_version = Rollbax.Client.code_version(config[:code_version])
+    _flush_timeout = Rollbax.Client.flush_timeout(config[:flush_timeout])
 
     children = [
       {Rollbax.Client, config}
@@ -177,7 +181,8 @@ defmodule Rollbax do
         :max_concurrency,
         :max_queue,
         :before_send,
-        :code_version
+        :code_version,
+        :flush_timeout
       ])
       |> put_if_present(:environment, env[:environment])
       |> put_if_present(:access_token, env[:access_token])

@@ -1,6 +1,8 @@
 defmodule Rollbax.HTTPClientTest do
   use ExUnit.RollbaxCase
 
+  require Logger
+
   alias Rollbax.Client
 
   defmodule RecordingClient do
@@ -286,6 +288,66 @@ defmodule Rollbax.HTTPClientTest do
     end)
 
     assert {:error, {:not_found, Rollbax.Logger}} = :logger.get_handler_config(Rollbax.Logger)
+  end
+
+  describe "when the client stops" do
+    test "the reports it holds are given the flush timeout to leave" do
+      client = start_client([hold: true], max_concurrency: 1, flush_timeout: 2_000)
+      :ok = emit()
+      :ok = emit()
+
+      assert_receive {:posted, first, _url, _headers, _body}
+      stopping = Task.async(fn -> GenServer.stop(client) end)
+
+      send(first, :answer)
+      assert_receive {:posted, second, _url, _headers, _body}
+      send(second, :answer)
+
+      assert Task.await(stopping) == :ok
+    end
+
+    test "it gives up on them at the flush timeout and says how many were left" do
+      client = start_client([hold: true], max_concurrency: 1, flush_timeout: 100)
+
+      log =
+        ExUnit.CaptureIO.capture_io(:user, fn ->
+          :ok = emit()
+          :ok = emit()
+          assert_receive {:posted, _task, _url, _headers, _body}
+
+          {microseconds, :ok} = :timer.tc(fn -> GenServer.stop(client) end)
+          assert microseconds < 1_000_000
+          Logger.flush()
+        end)
+
+      assert log =~ "[error] (Rollbax) 2 reports were not sent before the client stopped"
+    end
+
+    test "it does not wait when there is nothing left to send" do
+      client = start_client([], flush_timeout: 5_000)
+
+      {microseconds, :ok} = :timer.tc(fn -> GenServer.stop(client) end)
+      assert microseconds < 1_000_000
+    end
+  end
+
+  describe "the :flush_timeout configuration" do
+    test "defaults to five seconds and takes zero" do
+      assert Client.flush_timeout(nil) == 5_000
+      assert Client.flush_timeout(0) == 0
+    end
+
+    for value <- [-1, "100", :infinity] do
+      test "refuses #{inspect(value)}" do
+        assert_raise ArgumentError, ~r/:flush_timeout must be a number of milliseconds/, fn ->
+          Client.flush_timeout(unquote(value))
+        end
+      end
+    end
+
+    test "gives the supervisor a second more than the flush to stop the client" do
+      assert %{shutdown: 3_500} = Client.child_spec(flush_timeout: 2_500)
+    end
   end
 
   describe "the :code_version configuration" do
