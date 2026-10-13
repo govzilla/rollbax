@@ -18,10 +18,11 @@ defmodule Rollbax.Reporter.Standard do
 
     * for a GenServer: `"name"` and `"last_message"`
     * for a task: `"name"`, `"started_from"`, `"function"` and `"arguments"`
-    * for a state machine: `"name"`, `"state"` (its name, not its data) and `"last_event"`
+    * for a state machine: `"name"` and `"last_event"`
     * for a gen_event handler: `"name"`, `"manager"` and `"last_message"`
 
-  The state of a process is never among them.
+  The state of a process is never among them. It can still be in `"log"`: Elixir writes it
+  in the message of a crash when the Logger level is `:debug`.
   """
 
   @behaviour Rollbax.Reporter
@@ -111,20 +112,16 @@ defmodule Rollbax.Reporter.Standard do
     )
   end
 
+  # The report's `:state` is whatever the module's `format_status` returns, so neither part
+  # of it can be told from the machine's data.
   defp details(%{msg: {:report, %{label: {:gen_statem, :terminate}} = report}}) do
-    state =
-      case report do
-        %{state: {state_name, _data}} -> %{"state" => inspect_value(state_name)}
-        %{} -> %{}
-      end
-
     last_event =
       case report do
         %{queue: [event | _postponed]} -> %{"last_event" => inspect_value(event)}
         %{} -> %{}
       end
 
-    report |> inspected(name: "name") |> Map.merge(state) |> Map.merge(last_event)
+    report |> inspected(name: "name") |> Map.merge(last_event)
   end
 
   defp details(%{msg: {:report, %{label: {:gen_event, :terminate}} = report}}) do

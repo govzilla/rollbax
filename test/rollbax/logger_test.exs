@@ -351,7 +351,7 @@ defmodule Rollbax.LoggerTest do
       purge_module(MyModule)
     end
 
-    test "is sent for a state machine, with the name of its state and not its data" do
+    test "is sent for a state machine, without its state or its data" do
       defmodule Elixir.MyStateMachine do
         @behaviour :gen_statem
 
@@ -368,10 +368,10 @@ defmodule Rollbax.LoggerTest do
           assert_performed_request()["data"]["custom"]
         end)
 
-      assert %{"name" => name, "state" => ":idle", "last_event" => "{:cast, :raise_error}"} =
-               custom
-
+      assert %{"name" => name, "last_event" => "{:cast, :raise_error}"} = custom
       assert name == inspect(state_machine)
+      refute Map.has_key?(custom, "state")
+      refute inspect(custom) =~ "s3cr3t"
     after
       purge_module(MyStateMachine)
     end
