@@ -245,7 +245,7 @@ defmodule Rollbax.HTTPClientTest do
     on_exit(&RollbarAPI.stop/0)
 
     body = Jason.encode!(%{"data" => %{"custom" => %{}}})
-    options = [headers: [{"x-gateway-key", "secret"}]]
+    options = [headers: [{"x-gateway-key", "secret"}, content_type: "text/plain"]]
 
     assert {:ok, 200, _headers, _body} =
              Rollbax.HTTPClient.Req.post(
@@ -257,7 +257,7 @@ defmodule Rollbax.HTTPClientTest do
 
     assert_receive {:api_request_headers, headers}
     assert {"x-gateway-key", "secret"} in headers
-    assert {"content-type", "application/json"} in headers
+    assert for({"content-type", value} <- headers, do: value) == ["application/json"]
   end
 
   test "the Req client never decodes the body, whatever its options say" do
@@ -297,9 +297,9 @@ defmodule Rollbax.HTTPClientTest do
       assert Client.report_timeout(250) == 250
     end
 
-    for value <- [0, -1, "100", :infinity] do
+    for value <- [0, -1, "100", :infinity, 18_446_744_073_709_551_615] do
       test "refuses #{inspect(value)}" do
-        assert_raise ArgumentError, ~r/:report_timeout must be a positive number/, fn ->
+        assert_raise ArgumentError, ~r/:report_timeout must be a number of milliseconds/, fn ->
           Client.report_timeout(unquote(value))
         end
       end

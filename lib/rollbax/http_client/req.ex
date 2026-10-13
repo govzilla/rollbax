@@ -33,7 +33,7 @@ if Code.ensure_loaded?(Req) do
         |> Keyword.merge(
           method: :post,
           url: url,
-          headers: Enum.to_list(configured_headers) ++ headers,
+          headers: merge_headers(configured_headers, headers),
           body: body,
           decode_body: false
         )
@@ -46,6 +46,21 @@ if Code.ensure_loaded?(Req) do
           {:error, exception}
       end
     end
+
+    # A configured header gives way to the one Rollbax sets under the same name.
+    defp merge_headers(configured_headers, headers) do
+      names = MapSet.new(headers, fn {name, _value} -> normalize_name(name) end)
+
+      configured_headers
+      |> Enum.reject(fn {name, _value} -> MapSet.member?(names, normalize_name(name)) end)
+      |> Enum.concat(headers)
+    end
+
+    # Req takes header names as strings or atoms, and reads `_` in an atom as `-`.
+    defp normalize_name(name) when is_atom(name),
+      do: name |> Atom.to_string() |> String.replace("_", "-") |> String.downcase()
+
+    defp normalize_name(name) when is_binary(name), do: String.downcase(name)
 
     # Req returns a list of values per header, or a single one when it is compiled with
     # `legacy_headers_as_lists`.

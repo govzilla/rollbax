@@ -20,6 +20,8 @@ defmodule Rollbax.Client do
   @max_reports_in_flight 20
   @max_reports_waiting 1_000
   @default_report_timeout 60_000
+  # The longest wait an Erlang timer takes, in milliseconds.
+  @max_timer 4_294_967_295
   # The longest Rollbar may ask us to hold reports for, in seconds.
   @max_rate_limit_seconds 86_400
 
@@ -83,11 +85,14 @@ defmodule Rollbax.Client do
   Returns the `:report_timeout` configuration, in milliseconds.
   """
   def report_timeout(nil), do: @default_report_timeout
-  def report_timeout(timeout) when is_integer(timeout) and timeout > 0, do: timeout
+
+  def report_timeout(timeout) when is_integer(timeout) and timeout in 1..@max_timer//1,
+    do: timeout
 
   def report_timeout(other) do
     raise ArgumentError,
-          ":report_timeout must be a positive number of milliseconds, got: #{inspect(other)}"
+          ":report_timeout must be a number of milliseconds between 1 and #{@max_timer}, " <>
+            "got: #{inspect(other)}"
   end
 
   defp http_client_not_loaded_message(Rollbax.HTTPClient.Req) do
