@@ -22,6 +22,10 @@ defmodule Rollbax do
 
     * `:environment` - (binary) the environment that will be attached to each reported exception.
 
+    * `:code_version` - (binary) the version of the application's code, attached to every
+      report as the item's `code_version`. Rollbar reads a semantic version, an integer or a
+      Git SHA, and uses it to tell which release an error first appeared in.
+
     * `:enabled` - (`true | false | :log`) decides whether things reported with `report/5` or
       `report_message/4` are actually reported to Rollbar. If `true`, they are reported; if
       `false`, `report/5` and `report_message/4` don't do anything; if `:log`, things reported
@@ -134,6 +138,7 @@ defmodule Rollbax do
     _limit = Rollbax.Client.limit(:max_concurrency, config[:max_concurrency], nil)
     _limit = Rollbax.Client.limit(:max_queue, config[:max_queue], nil)
     _before_send = Rollbax.Client.before_send(config[:before_send])
+    _code_version = Rollbax.Client.code_version(config[:code_version])
 
     children = [
       {Rollbax.Client, config}
@@ -171,7 +176,8 @@ defmodule Rollbax do
         :report_timeout,
         :max_concurrency,
         :max_queue,
-        :before_send
+        :before_send,
+        :code_version
       ])
       |> put_if_present(:environment, env[:environment])
       |> put_if_present(:access_token, env[:access_token])

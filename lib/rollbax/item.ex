@@ -5,10 +5,10 @@ defmodule Rollbax.Item do
   # Refer to https://rollbar.com/docs/api/items_post for documentation on such
   # payload.
 
-  @spec draft(String.t() | nil, String.t() | nil, map) :: map
-  def draft(token, environment, custom)
+  @spec draft(String.t() | nil, String.t() | nil, map, String.t() | nil) :: map
+  def draft(token, environment, custom, code_version \\ nil)
       when (is_binary(token) or is_nil(token)) and (is_binary(environment) or is_nil(environment)) and
-             is_map(custom) do
+             is_map(custom) and (is_binary(code_version) or is_nil(code_version)) do
     data = %{
       "server" => %{
         "host" => host()
@@ -21,7 +21,7 @@ defmodule Rollbax.Item do
 
     %{
       "access_token" => token,
-      "data" => put_custom(data, custom)
+      "data" => data |> put_code_version(code_version) |> put_custom(custom)
     }
   end
 
@@ -146,6 +146,9 @@ defmodule Rollbax.Item do
       frame
     end
   end
+
+  defp put_code_version(data, nil), do: data
+  defp put_code_version(data, code_version), do: Map.put(data, "code_version", code_version)
 
   defp put_custom(data, custom) do
     if map_size(custom) == 0 do

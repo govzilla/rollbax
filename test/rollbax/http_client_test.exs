@@ -288,6 +288,39 @@ defmodule Rollbax.HTTPClientTest do
     assert {:error, {:not_found, Rollbax.Logger}} = :logger.get_handler_config(Rollbax.Logger)
   end
 
+  describe "the :code_version configuration" do
+    test "is sent with every report" do
+      start_client([], code_version: "1.4.2")
+      :ok = emit()
+
+      assert_receive {:posted, _task, _url, _headers, body}
+
+      assert %{"data" => %{"code_version" => "1.4.2"}} =
+               body |> IO.iodata_to_binary() |> Jason.decode!()
+    end
+
+    test "is left out when it is not set" do
+      start_client([])
+      :ok = emit()
+
+      assert_receive {:posted, _task, _url, _headers, body}
+
+      refute body
+             |> IO.iodata_to_binary()
+             |> Jason.decode!()
+             |> Map.fetch!("data")
+             |> Map.has_key?("code_version")
+    end
+
+    for value <- ["", 142, :v1] do
+      test "refuses #{inspect(value)}" do
+        assert_raise ArgumentError, ~r/:code_version must be a non-empty string/, fn ->
+          Client.code_version(unquote(value))
+        end
+      end
+    end
+  end
+
   describe "the :before_send configuration" do
     defmodule Redactor do
       def redact(data), do: put_in(data, ["body", "message", "body"], "[redacted]")

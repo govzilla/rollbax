@@ -49,7 +49,13 @@ defmodule Rollbax.Client do
 
   def start_link(config) do
     state = %__MODULE__{
-      draft: Item.draft(config[:access_token], config[:environment], config[:custom]),
+      draft:
+        Item.draft(
+          config[:access_token],
+          config[:environment],
+          config[:custom],
+          code_version(config[:code_version])
+        ),
       url: config[:api_endpoint],
       enabled: config[:enabled],
       http_client: http_client(config[:http_client]),
@@ -87,6 +93,18 @@ defmodule Rollbax.Client do
   def http_client(other) do
     raise ArgumentError,
           ":http_client must be a module or a {module, options} tuple, got: #{inspect(other)}"
+  end
+
+  @doc """
+  Returns the `:code_version` configuration.
+  """
+  def code_version(nil), do: nil
+
+  def code_version(code_version) when is_binary(code_version) and code_version != "",
+    do: code_version
+
+  def code_version(other) do
+    raise ArgumentError, ":code_version must be a non-empty string, got: #{inspect(other)}"
   end
 
   @doc """
