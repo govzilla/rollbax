@@ -9,8 +9,9 @@ This is the first release of Govzilla's fork.
 * **BREAKING CHANGE**: `Rollbax.Logger` is a `:logger` handler instead of an `:error_logger` handler. On current Erlang and Elixir the `:error_logger` handler received nothing, so crash reports were not being sent. Reporters now receive the `:logger` event in `c:Rollbax.Reporter.handle_event/2`, and `Rollbax.Reporter.Standard` reports every event that carries a `:crash_reason`.
 * **BREAKING CHANGE**: A crash report carries the logged message as the `"log"` custom value, in place of the `"name"`, `"last_message"`, `"state"` and similar values.
 * **BREAKING CHANGE**: Increased Elixir version requirement to 1.15 and higher.
-* At most 20 reports are posted at once and up to 1,000 wait their turn; beyond that reports are dropped and the drop is logged.
-* The rate limiting header is read whatever its case.
+* At most 20 reports are posted at once and up to 1,000 wait their turn; beyond that reports are dropped. A report that is not answered within `:report_timeout` (a minute by default) is abandoned.
+* The rate limiting header is read whatever its case. A value that is not a number of seconds between zero and a day is ignored instead of crashing the client, and only the latest rate limit decides when reporting resumes.
+* An unexpected answer from the HTTP client is logged instead of crashing the client.
 * The "unexpected API status" log no longer includes the reason phrase.
 * Fixed the warnings current Elixir versions emit.
 

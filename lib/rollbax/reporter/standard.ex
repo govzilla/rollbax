@@ -4,7 +4,8 @@ defmodule Rollbax.Reporter.Standard do
   Rollbar exceptions.
 
   It reports the events that carry a `:crash_reason` in their metadata, which is how Elixir
-  logs a GenServer, a task, a state machine or a plain process that terminated abnormally.
+  logs a GenServer, a task or a plain process that terminated abnormally, and, from Elixir
+  1.17 on, a state machine.
   Libraries that log their own crashes that way are reported too. Everything else is left to
   the next reporter.
 
@@ -96,8 +97,17 @@ defmodule Rollbax.Reporter.Standard do
   defp custom(""), do: %{}
 
   defp custom(log) when byte_size(log) > @max_log_bytes do
-    %{"log" => String.slice(log, 0, @max_log_bytes) <> " (truncated)"}
+    %{"log" => truncate(binary_part(log, 0, @max_log_bytes)) <> " (truncated)"}
   end
 
   defp custom(log), do: %{"log" => log}
+
+  # The cut may have fallen inside a character, whose first bytes are then dropped too.
+  defp truncate(binary) do
+    if String.valid?(binary) or binary == "" do
+      binary
+    else
+      truncate(binary_part(binary, 0, byte_size(binary) - 1))
+    end
+  end
 end

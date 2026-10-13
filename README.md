@@ -54,7 +54,7 @@ Rollbax provides a way to automatically report crashes from OTP processes (GenSe
 config :rollbax, enable_crash_reports: true
 ```
 
-Rollbax then adds a `:logger` handler that reports every logged event carrying a crash reason: a GenServer, a task, a state machine or a plain process that terminated abnormally, and the crashes libraries log the same way. For more information, check out the documentation for `Rollbax.Logger`.
+Rollbax then adds a `:logger` handler that reports every logged event carrying a crash reason: a GenServer, a task or a plain process that terminated abnormally, a state machine from Elixir 1.17 on, and the crashes libraries log the same way. For more information, check out the documentation for `Rollbax.Logger`.
 
 ### Plug and Phoenix
 

@@ -10,6 +10,19 @@ defmodule Rollbax.LoggerTest do
     def handle_event(_level, _event), do: raise("the reporter failed")
   end
 
+  defmodule LoggingReporter do
+    @behaviour Rollbax.Reporter
+
+    @impl true
+    def handle_event(_level, %{meta: %{crash_reason: {reason, stacktrace}}}) do
+      send(:logger_test, :reporter_called)
+      Logger.error("the reporter saw a crash", crash_reason: {reason, stacktrace})
+      :ignore
+    end
+
+    def handle_event(_level, _event), do: :next
+  end
+
   defmodule RenamingReporter do
     @behaviour Rollbax.Reporter
 
@@ -49,11 +62,11 @@ defmodule Rollbax.LoggerTest do
 
     {:ok, gen_server} = GenServer.start(MyGenServer, {})
 
-    capture_log(fn ->
-      GenServer.cast(gen_server, :raise_elixir)
-    end)
-
-    data = assert_performed_request()["data"]
+    data =
+      quietly(fn ->
+        GenServer.cast(gen_server, :raise_elixir)
+        assert_performed_request()["data"]
+      end)
 
     exception = data["body"]["trace"]["exception"]
     assert exception["class"] == "GenServer terminating (KeyError)"
@@ -82,11 +95,11 @@ defmodule Rollbax.LoggerTest do
 
     {:ok, gen_server} = GenServer.start(MyGenServer, {})
 
-    capture_log(fn ->
-      GenServer.cast(gen_server, :raise_erlang)
-    end)
-
-    data = assert_performed_request()["data"]
+    data =
+      quietly(fn ->
+        GenServer.cast(gen_server, :raise_erlang)
+        assert_performed_request()["data"]
+      end)
 
     exception = data["body"]["trace"]["exception"]
     assert exception["class"] == "GenServer terminating (BadMapError)"
@@ -113,11 +126,11 @@ defmodule Rollbax.LoggerTest do
 
     {:ok, gen_server} = GenServer.start(MyGenServer, {})
 
-    capture_log(fn ->
-      GenServer.cast(gen_server, :call_self)
-    end)
-
-    data = assert_performed_request()["data"]
+    data =
+      quietly(fn ->
+        GenServer.cast(gen_server, :call_self)
+        assert_performed_request()["data"]
+      end)
 
     exception = data["body"]["trace"]["exception"]
     assert exception["class"] == "GenServer terminating"
@@ -143,11 +156,11 @@ defmodule Rollbax.LoggerTest do
 
     {:ok, gen_server} = GenServer.start(MyGenServer, {})
 
-    capture_log(fn ->
-      GenServer.cast(gen_server, :stop)
-    end)
-
-    data = assert_performed_request()["data"]
+    data =
+      quietly(fn ->
+        GenServer.cast(gen_server, :stop)
+        assert_performed_request()["data"]
+      end)
 
     assert data["body"]["trace"]["exception"] == %{
              "class" => "GenServer terminating (stop)",
@@ -178,11 +191,11 @@ defmodule Rollbax.LoggerTest do
     {:ok, manager} = :gen_event.start()
     :ok = :gen_event.add_handler(manager, MyGenEventHandler, {})
 
-    capture_log(fn ->
-      :gen_event.notify(manager, :raise_error)
-    end)
-
-    data = assert_performed_request()["data"]
+    data =
+      quietly(fn ->
+        :gen_event.notify(manager, :raise_error)
+        assert_performed_request()["data"]
+      end)
 
     assert data["body"]["trace"]["exception"] == %{
              "class" => "gen_event handler terminating (RuntimeError)",
@@ -196,6 +209,8 @@ defmodule Rollbax.LoggerTest do
     purge_module(MyGenEventHandler)
   end
 
+  # Elixir translates the crash of a state machine from 1.17 on.
+  @tag skip: Version.match?(System.version(), "< 1.17.0") and "needs Elixir 1.17"
   test "state machine terminating" do
     defmodule Elixir.MyStateMachine do
       @behaviour :gen_statem
@@ -210,11 +225,11 @@ defmodule Rollbax.LoggerTest do
 
     {:ok, state_machine} = :gen_statem.start(MyStateMachine, {}, [])
 
-    capture_log(fn ->
-      :gen_statem.cast(state_machine, :raise_error)
-    end)
-
-    data = assert_performed_request()["data"]
+    data =
+      quietly(fn ->
+        :gen_statem.cast(state_machine, :raise_error)
+        assert_performed_request()["data"]
+      end)
 
     exception = data["body"]["trace"]["exception"]
     assert exception["class"] == "State machine terminating (BadMapError)"
@@ -317,6 +332,27 @@ defmodule Rollbax.LoggerTest do
       log = assert_performed_request()["data"]["custom"]["log"]
       assert byte_size(log) == 8_000 + byte_size(" (truncated)")
       assert String.ends_with?(log, "a (truncated)")
+    end)
+  end
+
+  test "a long logged message is cut by bytes, at the end of a character" do
+    capture_log(fn ->
+      # Three bytes each, so the cut at 8,000 bytes falls inside one.
+      Logger.error(String.duplicate("€", 10_000), crash_reason: {:shutdown, []})
+
+      log = assert_performed_request()["data"]["custom"]["log"]
+      assert log == String.duplicate("€", 2_666) <> " (truncated)"
+    end)
+  end
+
+  @tag reporters: [LoggingReporter]
+  test "what a reporter logs does not come back to it" do
+    Process.register(self(), :logger_test)
+
+    capture_log(fn ->
+      spawn(fn -> raise "oops" end)
+      assert_receive :reporter_called
+      refute_receive :reporter_called
     end)
   end
 

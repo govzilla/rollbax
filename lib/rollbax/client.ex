@@ -19,6 +19,9 @@ defmodule Rollbax.Client do
   @headers [{"content-type", "application/json"}]
   @max_reports_in_flight 20
   @max_reports_waiting 1_000
+  @default_report_timeout 60_000
+  # The longest Rollbar may ask us to hold reports for, in seconds.
+  @max_rate_limit_seconds 86_400
 
   ## GenServer state
 
@@ -29,7 +32,9 @@ defmodule Rollbax.Client do
     :http_client,
     :task_supervisor,
     rate_limited?: false,
-    in_flight: MapSet.new(),
+    rate_limit_timer: nil,
+    report_timeout: @default_report_timeout,
+    in_flight: %{},
     waiting: :queue.new(),
     waiting_count: 0
   ]
@@ -41,7 +46,8 @@ defmodule Rollbax.Client do
       draft: Item.draft(config[:access_token], config[:environment], config[:custom]),
       url: config[:api_endpoint],
       enabled: config[:enabled],
-      http_client: http_client(config[:http_client])
+      http_client: http_client(config[:http_client]),
+      report_timeout: config[:report_timeout] || @default_report_timeout
     }
 
     GenServer.start_link(__MODULE__, state, name: @name)
@@ -86,13 +92,26 @@ defmodule Rollbax.Client do
       when is_atom(level) and is_integer(timestamp) and timestamp > 0 and is_map(body) and
              is_map(custom) and is_map(occurrence_data) do
     if pid = Process.whereis(@name) do
-      event = {Atom.to_string(level), timestamp, body, custom, occurrence_data}
-      GenServer.cast(pid, {:emit, event})
+      # In a storm of errors the reports that would only pile up in the mailbox are dropped
+      # here, before they are copied to it.
+      if mailbox_has_room?(pid) do
+        event = {Atom.to_string(level), timestamp, body, custom, occurrence_data}
+        GenServer.cast(pid, {:emit, event})
+      else
+        :ok
+      end
     else
       Logger.warning(
         "(Rollbax) Trying to report an exception but the :rollbax application has not been started",
         rollbax: false
       )
+    end
+  end
+
+  defp mailbox_has_room?(pid) do
+    case Process.info(pid, :message_queue_len) do
+      {:message_queue_len, length} -> length < @max_reports_waiting
+      nil -> true
     end
   end
 
@@ -140,26 +159,50 @@ defmodule Rollbax.Client do
 
   @impl true
   def handle_info({ref, response}, %__MODULE__{} = state) when is_reference(ref) do
-    if MapSet.member?(state.in_flight, ref) do
-      Process.demonitor(ref, [:flush])
-      state = handle_response(response, %{state | in_flight: MapSet.delete(state.in_flight, ref)})
-      {:noreply, post_waiting(state)}
-    else
-      {:noreply, state}
+    case pop_in_flight(state, ref) do
+      {:ok, state} ->
+        Process.demonitor(ref, [:flush])
+        {:noreply, state |> handle_response(response) |> post_waiting()}
+
+      :error ->
+        {:noreply, state}
     end
   end
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, %__MODULE__{} = state) do
-    if MapSet.member?(state.in_flight, ref) do
-      Logger.error("(Rollbax) the task posting a report exited: #{inspect(reason)}")
-      {:noreply, post_waiting(%{state | in_flight: MapSet.delete(state.in_flight, ref)})}
-    else
-      {:noreply, state}
+    case pop_in_flight(state, ref) do
+      {:ok, state} ->
+        Logger.error("(Rollbax) the task posting a report exited: #{inspect(reason)}")
+        {:noreply, post_waiting(state)}
+
+      :error ->
+        {:noreply, state}
     end
   end
 
-  def handle_info(:lift_rate_limiting, state) do
-    {:noreply, %{state | rate_limited?: false}}
+  def handle_info({:request_deadline, ref}, %__MODULE__{} = state) do
+    case state.in_flight do
+      %{^ref => {pid, _deadline_timer}} ->
+        Logger.error("(Rollbax) connection error: no answer in #{state.report_timeout} ms")
+        Process.demonitor(ref, [:flush])
+        _ = Task.Supervisor.terminate_child(state.task_supervisor, pid)
+        {:noreply, post_waiting(%{state | in_flight: Map.delete(state.in_flight, ref)})}
+
+      %{} ->
+        {:noreply, state}
+    end
+  end
+
+  # Only the timer of the latest rate limit lifts it.
+  def handle_info(
+        {:lift_rate_limiting, timer_id},
+        %__MODULE__{rate_limit_timer: {timer_id, _}} = state
+      ) do
+    {:noreply, %{state | rate_limited?: false, rate_limit_timer: nil}}
+  end
+
+  def handle_info({:lift_rate_limiting, _timer_id}, state) do
+    {:noreply, state}
   end
 
   def handle_info(message, state) do
@@ -171,7 +214,7 @@ defmodule Rollbax.Client do
 
   defp post_or_enqueue(payload, %__MODULE__{} = state) do
     cond do
-      MapSet.size(state.in_flight) < @max_reports_in_flight ->
+      map_size(state.in_flight) < @max_reports_in_flight ->
         post(payload, state)
 
       state.waiting_count < @max_reports_waiting ->
@@ -213,7 +256,21 @@ defmodule Rollbax.Client do
         request(module, url, payload, options)
       end)
 
-    %{state | in_flight: MapSet.put(state.in_flight, task.ref)}
+    deadline_timer =
+      Process.send_after(self(), {:request_deadline, task.ref}, state.report_timeout)
+
+    %{state | in_flight: Map.put(state.in_flight, task.ref, {task.pid, deadline_timer})}
+  end
+
+  defp pop_in_flight(%__MODULE__{} = state, ref) do
+    case Map.pop(state.in_flight, ref) do
+      {{_pid, deadline_timer}, in_flight} ->
+        _ = Process.cancel_timer(deadline_timer)
+        {:ok, %{state | in_flight: in_flight}}
+
+      {nil, _in_flight} ->
+        :error
+    end
   end
 
   defp request(module, url, payload, options) do
@@ -242,8 +299,8 @@ defmodule Rollbax.Client do
     ]
   end
 
-  defp handle_response({:ok, status, headers, body}, state)
-       when is_integer(status) and is_list(headers) do
+  defp handle_response(state, {:ok, status, headers, body})
+       when is_integer(status) and is_list(headers) and is_binary(body) do
     if status != 200 do
       Logger.error("(Rollbax) unexpected API status: #{status}")
     end
@@ -251,20 +308,15 @@ defmodule Rollbax.Client do
     Logger.debug("(Rollbax) API headers: #{inspect(headers)}")
     log_body(body)
 
-    with 429 <- status,
-         :ok <- schedule_rate_limit_lifting(headers) do
-      %{state | rate_limited?: true}
-    else
-      _other -> state
-    end
+    if status == 429, do: rate_limit(state, headers), else: state
   end
 
-  defp handle_response({:error, reason}, state) do
+  defp handle_response(state, {:error, reason}) do
     Logger.error("(Rollbax) connection error: #{format_error(reason)}")
     state
   end
 
-  defp handle_response(other, state) do
+  defp handle_response(state, other) do
     Logger.error("(Rollbax) the HTTP client returned an unexpected value: #{inspect(other)}")
     state
   end
@@ -285,21 +337,27 @@ defmodule Rollbax.Client do
   defp format_error(%{__exception__: true} = exception), do: Exception.message(exception)
   defp format_error(reason), do: inspect(reason)
 
-  # It is possible that we receive multiple rate limited responses.
-  # Ideally, we should schedule rate limit lifting only once.
-  defp schedule_rate_limit_lifting(headers) do
+  # Several rate limited responses may arrive in a row. Each one replaces the timer of the
+  # one before, so the limit holds for as long as the latest response asked.
+  defp rate_limit(%__MODULE__{} = state, headers) do
     with remaining_seconds when is_binary(remaining_seconds) <- rate_limit_remaining(headers),
-         {remaining_seconds, ""} <- Integer.parse(remaining_seconds) do
-      Process.send_after(self(), :lift_rate_limiting, remaining_seconds * 1_000)
-      :ok
+         {seconds, ""} when seconds in 0..@max_rate_limit_seconds//1 <-
+           Integer.parse(remaining_seconds) do
+      cancel_rate_limit_timer(state.rate_limit_timer)
+      timer_id = make_ref()
+      timer = Process.send_after(self(), {:lift_rate_limiting, timer_id}, seconds * 1_000)
+      %{state | rate_limited?: true, rate_limit_timer: {timer_id, timer}}
     else
-      _other -> :error
+      _other -> state
     end
   end
 
+  defp cancel_rate_limit_timer({_timer_id, timer}), do: Process.cancel_timer(timer)
+  defp cancel_rate_limit_timer(nil), do: :ok
+
   defp rate_limit_remaining(headers) do
     Enum.find_value(headers, fn
-      {name, value} when is_binary(name) ->
+      {name, value} when is_binary(name) and is_binary(value) ->
         if String.downcase(name) == "x-rate-limit-remaining-seconds", do: value
 
       _other ->

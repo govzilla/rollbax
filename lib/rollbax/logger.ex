@@ -46,6 +46,7 @@ defmodule Rollbax.Logger do
   """
 
   @handler_id __MODULE__
+  @reporting {__MODULE__, :reporting}
 
   @doc false
   @spec attach([module]) :: :ok | {:error, term}
@@ -65,11 +66,16 @@ defmodule Rollbax.Logger do
   # that raises is removed, so nothing a reporter does may escape from here.
   @doc false
   def log(%{level: level, meta: meta} = event, %{config: %{reporters: reporters}}) do
-    if reportable?(meta) do
+    if reportable?(meta) and not Process.get(@reporting, false) do
+      # What a reporter logs while it handles an event must not come back here.
+      Process.put(@reporting, true)
+
       try do
         run_reporters(reporters, level, event)
       catch
         _kind, _reason -> :ok
+      after
+        Process.delete(@reporting)
       end
     end
 

@@ -39,6 +39,9 @@ defmodule Rollbax do
 
     * `:reporters` - see `Rollbax.Logger`.
 
+    * `:report_timeout` - (milliseconds) how long the HTTP client is given to post a report
+      before the attempt is abandoned. Defaults to `60_000`.
+
     * `:http_client` - (module or `{module, options}`) the `Rollbax.HTTPClient` that posts the
       reports. Defaults to `Rollbax.HTTPClient.Req`, which needs the `:req` dependency. The
       options are handed to the client on every request; for the default client they are
@@ -94,15 +97,18 @@ defmodule Rollbax do
     # Fails here, at startup, when the client cannot be used.
     {_module, _options} = Rollbax.Client.http_client(config[:http_client])
 
-    if config[:enable_crash_reports] do
-      :ok = Rollbax.Logger.attach(config[:reporters] || [Rollbax.Reporter.Standard])
-    end
-
     children = [
       {Rollbax.Client, config}
     ]
 
-    Supervisor.start_link(children, strategy: :one_for_one)
+    # The handler goes in only once there is a client to hand its reports to.
+    with {:ok, supervisor} <- Supervisor.start_link(children, strategy: :one_for_one) do
+      if config[:enable_crash_reports] do
+        :ok = Rollbax.Logger.attach(config[:reporters] || [Rollbax.Reporter.Standard])
+      end
+
+      {:ok, supervisor}
+    end
   end
 
   @doc false
@@ -123,7 +129,8 @@ defmodule Rollbax do
         :enable_crash_reports,
         :reporters,
         :proxy,
-        :http_client
+        :http_client,
+        :report_timeout
       ])
       |> put_if_present(:environment, env[:environment])
       |> put_if_present(:access_token, env[:access_token])

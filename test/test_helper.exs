@@ -17,25 +17,68 @@ defmodule ExUnit.RollbaxCase do
         env,
         custom \\ %{},
         api_endpoint \\ "http://localhost:4004",
-        http_client \\ nil
+        http_client \\ nil,
+        extra \\ []
       ) do
     start_supervised(
       {Rollbax.Client,
-       api_endpoint: api_endpoint,
-       access_token: token,
-       environment: env,
-       enabled: true,
-       custom: custom,
-       http_client: http_client}
+       [
+         api_endpoint: api_endpoint,
+         access_token: token,
+         environment: env,
+         enabled: true,
+         custom: custom,
+         http_client: http_client
+       ] ++ extra}
     )
   end
 
   def capture_log(fun) do
     ExUnit.CaptureIO.capture_io(:user, fn ->
       fun.()
-      Process.sleep(200)
+      await_client_idle()
       Logger.flush()
     end)
+  end
+
+  # Runs `fun` with what is logged kept off the terminal, and returns its result.
+  def quietly(fun) do
+    {result, _log} =
+      ExUnit.CaptureIO.with_io(:user, fn ->
+        result = fun.()
+        await_client_idle()
+        Logger.flush()
+        result
+      end)
+
+    result
+  end
+
+  # Waits until the client has handled everything it was sent and every report it posted
+  # has been answered, so what it logs about them is in the capture.
+  def await_client_idle(attempts \\ 100) do
+    idle? =
+      case Process.whereis(Rollbax.Client) do
+        nil ->
+          true
+
+        pid ->
+          state = :sys.get_state(pid)
+          {:message_queue_len, queued} = Process.info(pid, :message_queue_len)
+          map_size(state.in_flight) == 0 and state.waiting_count == 0 and queued == 0
+      end
+
+    cond do
+      idle? ->
+        :ok
+
+      attempts == 0 ->
+        :ok
+
+      true ->
+        Process.sleep(20)
+        await_client_idle(attempts - 1)
+    end
   end
 
   def assert_performed_request() do
