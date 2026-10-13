@@ -338,6 +338,70 @@ defmodule Rollbax.HTTPClientTest do
       assert posted_custom() == %{"duplicates_dropped" => 3}
     end
 
+    test "does not take a report the queue turned away for one that was sent" do
+      client = start_client([hold: true], max_concurrency: 1, max_queue: 1, dedupe_window: 60_000)
+      body = fn text -> %{"message" => %{"body" => text}} end
+
+      emit_and_wait = fn text ->
+        :ok = Client.emit(:error, System.system_time(:second), body.(text), %{}, %{})
+        :sys.get_state(client)
+      end
+
+      capture_log(fn ->
+        emit_and_wait.("a")
+        emit_and_wait.("b")
+        emit_and_wait.("turned away")
+
+        assert_receive {:posted, first, _url, _headers, _body}
+        send(first, :answer)
+        assert_receive {:posted, second, _url, _headers, _body}
+        send(second, :answer)
+        await_client_idle()
+
+        emit_and_wait.("turned away")
+        assert_receive {:posted, third, _url, _headers, posted}
+        send(third, :answer)
+
+        assert posted |> IO.iodata_to_binary() |> Jason.decode!() |> get_in(["data", "body"]) ==
+                 body.("turned away")
+      end)
+    end
+
+    test "remembers a bounded number of reports" do
+      client = start_client([], dedupe_window: 60_000)
+
+      for n <- 1..1_100 do
+        body = %{"message" => %{"body" => "report #{n}"}}
+        :ok = Client.emit(:error, System.system_time(:second), body, %{}, %{})
+        if rem(n, 100) == 0, do: :sys.get_state(client)
+      end
+
+      assert map_size(:sys.get_state(client).recent) == 1_000
+    end
+
+    test "when it must forget, forgets first what carries no count" do
+      client = start_client([], dedupe_window: 50)
+
+      for n <- 1..1_000 do
+        body = %{"message" => %{"body" => "report #{n}"}}
+        :ok = Client.emit(:error, System.system_time(:second), body, %{}, %{})
+        if rem(n, 100) == 0, do: :sys.get_state(client)
+      end
+
+      # One more like the first, within the window: it is left out and counted.
+      first = %{"message" => %{"body" => "report 1"}}
+      :ok = Client.emit(:error, System.system_time(:second), first, %{}, %{})
+      :sys.get_state(client)
+      Process.sleep(80)
+
+      # Every window is over. A new report makes room; the counted one stays.
+      :ok = emit()
+      recent = :sys.get_state(client).recent
+
+      assert map_size(recent) == 2
+      assert Enum.any?(recent, &match?({_key, {_expires_at, 1}}, &1))
+    end
+
     for value <- [0, -5, "60000", :infinity] do
       test "refuses #{inspect(value)}" do
         assert_raise ArgumentError, ~r/:dedupe_window must be a number of milliseconds/, fn ->

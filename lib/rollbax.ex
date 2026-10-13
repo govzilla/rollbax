@@ -53,8 +53,9 @@ defmodule Rollbax do
     * `:dedupe_window` - (milliseconds) when set, a report with the same level and the same
       exception or message as one sent less than that long ago is not sent. The next one
       that is sent says how many were left out, in the `"duplicates_dropped"` custom value.
-      Reports that differ only in their custom or occurrence data count as the same. Off by
-      default.
+      Reports that differ only in their custom or occurrence data count as the same. About
+      a thousand distinct reports are remembered at a time; past that, one more is simply
+      sent again. Off by default.
 
     * `:flush_timeout` - (milliseconds) how long the reports still waiting or being posted
       are given to leave when the application stops. `0` stops at once. Defaults to `5_000`.

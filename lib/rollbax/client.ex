@@ -23,6 +23,7 @@ defmodule Rollbax.Client do
   @default_report_timeout 60_000
   @default_flush_timeout 5_000
   @max_recent 1_000
+  @prune_interval 1_000
   # The longest wait an Erlang timer takes, in milliseconds.
   @max_timer 4_294_967_295
   # The longest Rollbar may ask us to hold reports for, in seconds.
@@ -45,6 +46,7 @@ defmodule Rollbax.Client do
     flush_timeout: @default_flush_timeout,
     dedupe_window: nil,
     recent: %{},
+    recent_pruned_at: nil,
     in_flight: %{},
     waiting: :queue.new(),
     waiting_count: 0
@@ -364,27 +366,36 @@ defmodule Rollbax.Client do
   end
 
   defp emitted(%__MODULE__{enabled: true} = state, event) do
-    with {:ok, event, state} <- deduplicate(state, event),
-         {:ok, item} <- compose(state.draft, event, state.before_send),
-         {:ok, payload} <- Jason.encode_to_iodata(item) do
-      post_or_enqueue(payload, state)
-    else
+    case duplicate(state, event) do
       {:duplicate, state} ->
         state
 
-      :drop ->
-        state
+      {:new, key, dropped} ->
+        event = put_duplicates_dropped(event, dropped)
 
-      {:error, exception} ->
-        Logger.error([
-          "(Rollbax) failed to encode report below ",
-          "for reason: ",
-          Exception.message(exception),
-          ?\n,
-          event_to_chardata(event)
-        ])
+        with {:ok, item} <- compose(state.draft, event, state.before_send),
+             {:ok, payload} <- Jason.encode_to_iodata(item),
+             {:accepted, state} <- post_or_enqueue(payload, state) do
+          # Only a report on its way is one a later report can be a duplicate of.
+          remember(state, key)
+        else
+          {:rejected, state} ->
+            state
 
-        state
+          :drop ->
+            state
+
+          {:error, exception} ->
+            Logger.error([
+              "(Rollbax) failed to encode report below ",
+              "for reason: ",
+              Exception.message(exception),
+              ?\n,
+              event_to_chardata(event)
+            ])
+
+            state
+        end
     end
   end
 
@@ -439,10 +450,9 @@ defmodule Rollbax.Client do
 
   # Within the window, a report with the level and the body of one already sent is dropped
   # and counted. The count leaves with the next such report that is sent.
-  defp deduplicate(%__MODULE__{dedupe_window: nil} = state, event), do: {:ok, event, state}
+  defp duplicate(%__MODULE__{dedupe_window: nil}, _event), do: {:new, nil, 0}
 
-  defp deduplicate(%__MODULE__{dedupe_window: window} = state, event) do
-    {level, _timestamp, body, _custom, _occurrence_data} = event
+  defp duplicate(%__MODULE__{} = state, {level, _timestamp, body, _custom, _occurrence_data}) do
     key = :erlang.md5(:erlang.term_to_binary({level, body}))
     now = System.monotonic_time(:millisecond)
 
@@ -451,10 +461,10 @@ defmodule Rollbax.Client do
         {:duplicate, %{state | recent: Map.put(state.recent, key, {expires_at, dropped + 1})}}
 
       %{^key => {_expires_at, dropped}} ->
-        {:ok, put_duplicates_dropped(event, dropped), remember(state, key, now + window, now)}
+        {:new, key, dropped}
 
       %{} ->
-        {:ok, event, remember(state, key, now + window, now)}
+        {:new, key, 0}
     end
   end
 
@@ -464,37 +474,60 @@ defmodule Rollbax.Client do
     {level, timestamp, body, Map.put(custom, "duplicates_dropped", dropped), occurrence_data}
   end
 
-  # The reports remembered are bounded: once there are many, the ones whose window is over
-  # are forgotten.
-  defp remember(%__MODULE__{recent: recent} = state, key, expires_at, now) do
-    recent =
-      if map_size(recent) >= @max_recent do
-        Map.reject(recent, fn {_key, {expires_at, _dropped}} -> expires_at <= now end)
-      else
-        recent
-      end
+  defp remember(%__MODULE__{} = state, nil), do: state
 
-    %{state | recent: Map.put(recent, key, {expires_at, 0})}
+  defp remember(%__MODULE__{dedupe_window: window} = state, key) do
+    now = System.monotonic_time(:millisecond)
+    state = make_room(state, key, now)
+
+    if is_map_key(state.recent, key) or map_size(state.recent) < @max_recent do
+      %{state | recent: Map.put(state.recent, key, {now + window, 0})}
+    else
+      # No room: this report is not remembered, so one like it will be sent again.
+      state
+    end
   end
+
+  # The reports remembered are bounded. When there are too many, the ones whose window is
+  # over are forgotten: first those that carry no count, then, if that was not enough, the
+  # others, whose count is lost. It looks at every one of them, so at most once a second.
+  defp make_room(%__MODULE__{recent: recent} = state, key, now)
+       when map_size(recent) >= @max_recent and not is_map_key(recent, key) and
+              (state.recent_pruned_at == nil or
+                 now - state.recent_pruned_at >= @prune_interval) do
+    expired = fn {_key, {expires_at, _dropped}} -> expires_at <= now end
+
+    recent =
+      Map.reject(recent, fn {_key, {_expires_at, dropped}} = entry ->
+        expired.(entry) and dropped == 0
+      end)
+
+    recent = if map_size(recent) >= @max_recent, do: Map.reject(recent, expired), else: recent
+
+    %{state | recent: recent, recent_pruned_at: now}
+  end
+
+  defp make_room(%__MODULE__{} = state, _key, _now), do: state
 
   defp post_or_enqueue(payload, %__MODULE__{} = state) do
     cond do
       map_size(state.in_flight) < state.max_concurrency ->
-        post(payload, state)
+        {:accepted, post(payload, state)}
 
       state.waiting_count < state.max_queue ->
-        %{
-          state
-          | waiting: :queue.in(payload, state.waiting),
-            waiting_count: state.waiting_count + 1
-        }
+        {:accepted,
+         %{
+           state
+           | waiting: :queue.in(payload, state.waiting),
+             waiting_count: state.waiting_count + 1
+         }}
 
       true ->
         Logger.error(
           "(Rollbax) dropped report: #{state.max_queue} reports are already waiting to be sent"
         )
 
-        state
+        {:rejected, state}
     end
   end
 
