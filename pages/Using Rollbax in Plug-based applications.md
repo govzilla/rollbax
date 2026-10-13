@@ -15,7 +15,7 @@ defmodule MyApp.Router do
 end
 ```
 
-The report carries the method, the URL without its query string, the address of the client and the headers of the request.
+The report carries the method, the URL without its query string, the address of the client and a few headers of the request.
 
 ## Metadata
 
@@ -36,10 +36,10 @@ Check the [documentation for the Rollbar API](https://docs.rollbar.com/reference
 
 ## Sensitive data
 
-A request is full of things that must not leave the application, so `Rollbax.Plug` sends little by default:
+A request is full of things that must not leave the application, so `Rollbax.Plug` sends only what is known to be harmless:
 
   * the query string and the parameters are not sent. `query_string: true` and `params: true` turn them on;
-  * the `authorization`, `cookie`, `proxy-authorization`, `set-cookie` and `x-csrf-token` headers are never sent. `:filter_headers` takes more names to leave out.
+  * of the headers, only `accept`, `accept-encoding`, `accept-language`, `content-length`, `content-type`, `host`, `origin`, `user-agent`, `x-forwarded-for`, `x-forwarded-proto` and `x-request-id` are sent. `:headers` takes the list to send in their place.
 
 When the parameters are sent, scrub them first. The `:before_send` configuration (see `Rollbax`) receives every report right before it is sent and is the place to do it:
 

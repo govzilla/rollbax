@@ -20,12 +20,14 @@ if Code.ensure_loaded?(Plug.Conn) do
     ## What is sent about the request
 
     The report carries a `"request"` Rollbar understands: the method, the URL without its
-    query string, the address of the client and the headers.
+    query string, the address of the client and a few headers.
 
-    It leaves out what most often holds secrets. The query string and the parameters are not
-    sent unless asked for, and the `authorization`, `cookie`, `proxy-authorization`,
-    `set-cookie` and `x-csrf-token` headers never are. `:before_send` (see `Rollbax`) is the
-    place for anything finer.
+    A request is full of things that must not leave the application, so only what is known
+    to be harmless is sent. The query string and the parameters are not sent unless asked
+    for. Of the headers, only these are: `accept`, `accept-encoding`, `accept-language`,
+    `content-length`, `content-type`, `host`, `origin`, `user-agent`, `x-forwarded-for`,
+    `x-forwarded-proto` and `x-request-id`. `:before_send` (see `Rollbax`) is the place for
+    anything finer.
 
     ## Options
 
@@ -39,11 +41,13 @@ if Code.ensure_loaded?(Plug.Conn) do
       * `:params` - (boolean) whether to send the parameters of the request, when they were
         fetched. Defaults to `false`.
 
-      * `:filter_headers` - (list of lower case names) more headers to leave out.
+      * `:headers` - (list of lower case names) the headers to send, in place of the ones
+        above. A header given more than once is sent with its values joined by `", "`.
 
     """
 
-    @filtered_headers ~w(authorization cookie proxy-authorization set-cookie x-csrf-token)
+    @default_headers ~w(accept accept-encoding accept-language content-length content-type host
+                        origin user-agent x-forwarded-for x-forwarded-proto x-request-id)
 
     @doc """
     Reports the error Plug caught while serving `conn`.
@@ -80,22 +84,21 @@ if Code.ensure_loaded?(Plug.Conn) do
     """
     @spec request(Plug.Conn.t(), keyword) :: map
     def request(%Plug.Conn{} = conn, options \\ []) when is_list(options) do
-      filtered = @filtered_headers ++ Keyword.get(options, :filter_headers, [])
-
       %{
         "method" => conn.method,
         "url" => url(conn),
         "user_ip" => conn.remote_ip |> :inet.ntoa() |> List.to_string(),
-        "headers" =>
-          for(
-            {name, value} <- conn.req_headers,
-            name not in filtered,
-            into: %{},
-            do: {name, value}
-          )
+        "headers" => headers(conn, Keyword.get(options, :headers, @default_headers))
       }
       |> put_query_string(conn, Keyword.get(options, :query_string, false))
       |> put_params(conn, Keyword.get(options, :params, false))
+    end
+
+    defp headers(%Plug.Conn{req_headers: req_headers}, names) when is_list(names) do
+      req_headers
+      |> Enum.filter(fn {name, _value} -> name in names end)
+      |> Enum.group_by(fn {name, _value} -> name end, fn {_name, value} -> value end)
+      |> Map.new(fn {name, values} -> {name, Enum.join(values, ", ")} end)
     end
 
     defp url(%Plug.Conn{} = conn) do

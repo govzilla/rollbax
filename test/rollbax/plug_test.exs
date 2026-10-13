@@ -23,6 +23,7 @@ defmodule Rollbax.PlugTest do
     |> Plug.Conn.put_req_header("authorization", "Bearer s3cr3t")
     |> Plug.Conn.put_req_header("cookie", "session=s3cr3t")
     |> Plug.Conn.put_req_header("x-api-key", "s3cr3t")
+    |> Plug.Conn.put_req_header("referer", "https://example.test/login?token=s3cr3t")
     |> Map.put(:remote_ip, {203, 0, 113, 7})
   end
 
@@ -41,8 +42,10 @@ defmodule Rollbax.PlugTest do
                "method" => "GET",
                "url" => "http://www.example.com/orders/7",
                "user_ip" => "203.0.113.7",
-               "headers" => %{"accept" => "text/html", "x-api-key" => "s3cr3t"}
+               "headers" => %{"accept" => "text/html"}
              }
+
+      refute inspect(data["request"]) =~ "s3cr3t"
     end
 
     test "sends the query string and the fetched parameters only when asked to" do
@@ -62,12 +65,24 @@ defmodule Rollbax.PlugTest do
       refute Map.has_key?(assert_performed_request()["data"]["request"], "params")
     end
 
-    test "leaves out the headers it is told to" do
-      :ok = Rollbax.Plug.report(request_conn(), @error, filter_headers: ["x-api-key"])
+    test "sends the headers it is told to, in place of its own choice" do
+      :ok = Rollbax.Plug.report(request_conn(), @error, headers: ["x-api-key"])
 
       assert assert_performed_request()["data"]["request"]["headers"] == %{
-               "accept" => "text/html"
+               "x-api-key" => "s3cr3t"
              }
+    end
+
+    test "joins the values of a header given more than once" do
+      conn =
+        request_conn()
+        |> Map.update!(:req_headers, &(&1 ++ [{"x-forwarded-for", "198.51.100.1"}]))
+        |> Map.update!(:req_headers, &(&1 ++ [{"x-forwarded-for", "198.51.100.2"}]))
+
+      :ok = Rollbax.Plug.report(conn, @error)
+
+      assert assert_performed_request()["data"]["request"]["headers"]["x-forwarded-for"] ==
+               "198.51.100.1, 198.51.100.2"
     end
 
     test "takes custom and occurrence data, and a request of the caller's own" do
