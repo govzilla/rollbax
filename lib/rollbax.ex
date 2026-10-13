@@ -119,6 +119,11 @@ defmodule Rollbax do
   quick. When it raises, or returns anything but a map or `nil`, the report is not sent and
   the failure is logged.
 
+  ## Telemetry
+
+  Rollbax emits `:telemetry` events when a report is posted, fails or is dropped. See
+  `Rollbax.Telemetry`.
+
   ## Crash reports
 
   Rollbax provides a `:logger` handler that reports logged crashes and exits to Rollbar. For

@@ -36,6 +36,7 @@ defmodule Rollbax.Mixfile do
   defp deps() do
     [
       {:jason, "~> 1.0"},
+      {:telemetry, "~> 1.0"},
       {:req, "~> 0.5", optional: true},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:plug, "~> 1.16", only: :test},

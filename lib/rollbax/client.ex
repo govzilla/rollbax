@@ -14,6 +14,7 @@ defmodule Rollbax.Client do
   require Logger
 
   alias Rollbax.Item
+  alias Rollbax.Telemetry
 
   @name __MODULE__
   @headers [{"content-type", "application/json"}]
@@ -217,7 +218,7 @@ defmodule Rollbax.Client do
         event = {Atom.to_string(level), timestamp, body, custom, occurrence_data}
         GenServer.cast(pid, {:emit, event})
       else
-        :ok
+        Telemetry.dropped(:queue_full)
       end
     else
       Logger.warning(
@@ -288,6 +289,7 @@ defmodule Rollbax.Client do
 
     if pending > 0 do
       Logger.error("(Rollbax) #{pending} reports were not sent before the client stopped")
+      Telemetry.dropped(:shutdown, pending)
     end
 
     :ok
@@ -355,6 +357,7 @@ defmodule Rollbax.Client do
 
   defp emitted(%__MODULE__{rate_limited?: true} = state, _event) do
     Logger.info("(Rollbax) ignored report due to rate limiting")
+    Telemetry.dropped(:rate_limited)
     state
   end
 
@@ -368,6 +371,7 @@ defmodule Rollbax.Client do
   defp emitted(%__MODULE__{enabled: true} = state, event) do
     case duplicate(state, event) do
       {:duplicate, state} ->
+        Telemetry.dropped(:duplicate)
         state
 
       {:new, key, dropped} ->
@@ -384,6 +388,7 @@ defmodule Rollbax.Client do
             state
 
           :drop ->
+            Telemetry.dropped(:before_send)
             state
 
           {:error, exception} ->
@@ -395,6 +400,7 @@ defmodule Rollbax.Client do
               event_to_chardata(event)
             ])
 
+            Telemetry.dropped(:invalid)
             state
         end
     end
@@ -417,6 +423,7 @@ defmodule Rollbax.Client do
     case pop_in_flight(state, ref) do
       {:ok, carried, state} ->
         Logger.error("(Rollbax) the task posting a report exited: #{inspect(reason)}")
+        Telemetry.failed({:exit, reason})
         {:ok, state |> not_delivered(carried) |> post_waiting()}
 
       :error ->
@@ -428,6 +435,7 @@ defmodule Rollbax.Client do
     case state.in_flight do
       %{^ref => {pid, _deadline_timer, carried}} ->
         Logger.error("(Rollbax) connection error: no answer in #{state.report_timeout} ms")
+        Telemetry.failed(:timeout)
         Process.demonitor(ref, [:flush])
         # Killed outright: waiting for the task to shut down would hold every other report.
         Process.exit(pid, :kill)
@@ -574,6 +582,7 @@ defmodule Rollbax.Client do
           "(Rollbax) dropped report: #{state.max_queue} reports are already waiting to be sent"
         )
 
+        Telemetry.dropped(:queue_full)
         {:rejected, state}
     end
   end
@@ -581,6 +590,7 @@ defmodule Rollbax.Client do
   defp post_waiting(%__MODULE__{rate_limited?: true, waiting_count: count} = state)
        when count > 0 do
     Logger.info("(Rollbax) ignored #{count} waiting reports due to rate limiting")
+    Telemetry.dropped(:rate_limited, count)
 
     state =
       state.waiting
@@ -713,17 +723,20 @@ defmodule Rollbax.Client do
 
     Logger.debug("(Rollbax) API headers: #{inspect(headers)}")
     log_body(body)
+    Telemetry.posted(status)
 
     if status == 429, do: rate_limit(state, headers), else: state
   end
 
   defp handle_response(state, {:error, reason}) do
     Logger.error("(Rollbax) connection error: #{format_error(reason)}")
+    Telemetry.failed(reason)
     state
   end
 
   defp handle_response(state, other) do
     Logger.error("(Rollbax) the HTTP client returned an unexpected value: #{inspect(other)}")
+    Telemetry.failed(:unexpected_response)
     state
   end
 

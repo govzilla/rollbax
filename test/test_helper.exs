@@ -1,5 +1,6 @@
 Logger.configure(level: :info)
 {:ok, _} = Application.ensure_all_started(:req)
+{:ok, _} = Application.ensure_all_started(:telemetry)
 {:ok, _} = Application.ensure_all_started(:bandit)
 ExUnit.start()
 
