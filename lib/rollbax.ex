@@ -42,6 +42,10 @@ defmodule Rollbax do
     * `:report_timeout` - (milliseconds) how long the HTTP client is given to post a report
       before the attempt is abandoned. Defaults to `60_000`.
 
+    * `:before_send` - (`{module, function}` or a function of one argument) called with every
+      report right before it is sent, to redact it or to keep it from being sent. See
+      "Redacting reports" below.
+
     * `:max_concurrency` - (positive integer) how many reports are posted at once. Defaults
       to `20`.
 
@@ -71,6 +75,30 @@ defmodule Rollbax do
           Keyword.put(config, :access_token, System.get_env("ROLLBAR_ACCESS_TOKEN"))
         end
       end
+
+  ## Redacting reports
+
+  A report can carry more than was meant to leave the application: the arguments of the
+  function that failed, when the stacktrace holds them, and, for a crashed process, the log
+  of the crash with the last message the process received.
+
+  The `:before_send` callback receives the `"data"` of the
+  [item](https://docs.rollbar.com/reference/create-item) about to be posted, a map with
+  string keys, and returns the map to send in its place, or `nil` to send nothing:
+
+      config :rollbax, before_send: {MyApp.Rollbar, :redact}
+
+      defmodule MyApp.Rollbar do
+        def redact(%{"custom" => %{"log" => _}} = data) do
+          update_in(data["custom"], &Map.delete(&1, "log"))
+        end
+
+        def redact(data), do: data
+      end
+
+  It runs in the process that sends the reports, one report at a time, so it should be
+  quick. When it raises, or returns anything but a map or `nil`, the report is not sent and
+  the failure is logged.
 
   ## Crash reports
 
@@ -105,6 +133,7 @@ defmodule Rollbax do
     _timeout = Rollbax.Client.report_timeout(config[:report_timeout])
     _limit = Rollbax.Client.limit(:max_concurrency, config[:max_concurrency], nil)
     _limit = Rollbax.Client.limit(:max_queue, config[:max_queue], nil)
+    _before_send = Rollbax.Client.before_send(config[:before_send])
 
     children = [
       {Rollbax.Client, config}
@@ -141,7 +170,8 @@ defmodule Rollbax do
         :http_client,
         :report_timeout,
         :max_concurrency,
-        :max_queue
+        :max_queue,
+        :before_send
       ])
       |> put_if_present(:environment, env[:environment])
       |> put_if_present(:access_token, env[:access_token])

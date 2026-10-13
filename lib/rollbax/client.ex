@@ -39,6 +39,7 @@ defmodule Rollbax.Client do
     report_timeout: @default_report_timeout,
     max_concurrency: @default_max_concurrency,
     max_queue: @default_max_queue,
+    before_send: nil,
     in_flight: %{},
     waiting: :queue.new(),
     waiting_count: 0
@@ -55,7 +56,8 @@ defmodule Rollbax.Client do
       report_timeout: report_timeout(config[:report_timeout]),
       max_concurrency:
         limit(:max_concurrency, config[:max_concurrency], @default_max_concurrency),
-      max_queue: limit(:max_queue, config[:max_queue], @default_max_queue)
+      max_queue: limit(:max_queue, config[:max_queue], @default_max_queue),
+      before_send: before_send(config[:before_send])
     }
 
     GenServer.start_link(__MODULE__, state, name: @name)
@@ -85,6 +87,26 @@ defmodule Rollbax.Client do
   def http_client(other) do
     raise ArgumentError,
           ":http_client must be a module or a {module, options} tuple, got: #{inspect(other)}"
+  end
+
+  @doc """
+  Returns the `:before_send` configuration, or raises when it cannot be called.
+  """
+  def before_send(nil), do: nil
+  def before_send(fun) when is_function(fun, 1), do: fun
+
+  def before_send({module, function} = callback) when is_atom(module) and is_atom(function) do
+    if Code.ensure_loaded?(module) and function_exported?(module, function, 1) do
+      callback
+    else
+      raise ArgumentError, ":before_send #{inspect(module)}.#{function}/1 is not defined"
+    end
+  end
+
+  def before_send(other) do
+    raise ArgumentError,
+          ":before_send must be a {module, function} tuple or a function of one argument, " <>
+            "got: #{inspect(other)}"
   end
 
   @doc """
@@ -178,9 +200,12 @@ defmodule Rollbax.Client do
   end
 
   def handle_cast({:emit, event}, %{enabled: true} = state) do
-    case compose_json(state.draft, event) do
-      {:ok, payload} ->
-        {:noreply, post_or_enqueue(payload, state)}
+    with {:ok, item} <- compose(state.draft, event, state.before_send),
+         {:ok, payload} <- Jason.encode_to_iodata(item) do
+      {:noreply, post_or_enqueue(payload, state)}
+    else
+      :drop ->
+        {:noreply, state}
 
       {:error, exception} ->
         Logger.error([
@@ -318,11 +343,46 @@ defmodule Rollbax.Client do
     kind, reason -> {:error, {kind, reason}}
   end
 
-  defp compose_json(draft, event) do
-    draft
-    |> Item.compose(event)
-    |> Jason.encode_to_iodata()
+  # `:before_send` sees the "data" of the item, never the access token next to it.
+  defp compose(draft, event, before_send) do
+    %{"data" => data} = item = Item.compose(draft, event)
+
+    case apply_before_send(before_send, data) do
+      {:ok, data} -> {:ok, %{item | "data" => data}}
+      :drop -> :drop
+    end
   end
+
+  defp apply_before_send(nil, data), do: {:ok, data}
+
+  defp apply_before_send(before_send, data) do
+    case call_before_send(before_send, data) do
+      %{} = data ->
+        {:ok, data}
+
+      drop when drop in [nil, false] ->
+        :drop
+
+      other ->
+        Logger.error(
+          "(Rollbax) dropped report: :before_send returned #{inspect(other)} instead of a map or nil"
+        )
+
+        :drop
+    end
+  catch
+    # A report that could not be looked over is not sent.
+    kind, reason ->
+      Logger.error([
+        "(Rollbax) dropped report: :before_send failed\n",
+        Exception.format(kind, reason, __STACKTRACE__)
+      ])
+
+      :drop
+  end
+
+  defp call_before_send({module, function}, data), do: apply(module, function, [data])
+  defp call_before_send(fun, data) when is_function(fun, 1), do: fun.(data)
 
   defp event_to_chardata({level, timestamp, body, custom, occurrence_data}) do
     [

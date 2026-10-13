@@ -68,6 +68,16 @@ For non-production environments error reporting can be either disabled completel
 config :rollbax, enabled: :log
 ```
 
+### Redacting reports
+
+A report can carry the arguments of the function that failed and, for a crashed process, the last message it received. `:before_send` receives every report right before it is sent and returns it changed, or `nil` to send nothing:
+
+```elixir
+config :rollbax, before_send: {MyApp.Rollbar, :redact}
+```
+
+See the documentation of `Rollbax` for what the callback receives.
+
 ### HTTP client
 
 Reports are posted by a module implementing the `Rollbax.HTTPClient` behaviour. The default is `Rollbax.HTTPClient.Req`, and the options given next to it are passed to Req, so that is where a timeout or a proxy goes:

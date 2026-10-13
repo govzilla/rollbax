@@ -288,6 +288,91 @@ defmodule Rollbax.HTTPClientTest do
     assert {:error, {:not_found, Rollbax.Logger}} = :logger.get_handler_config(Rollbax.Logger)
   end
 
+  describe "the :before_send configuration" do
+    defmodule Redactor do
+      def redact(data), do: put_in(data, ["body", "message", "body"], "[redacted]")
+    end
+
+    test "takes a function or a {module, function} pair" do
+      fun = fn data -> data end
+
+      assert Client.before_send(nil) == nil
+      assert Client.before_send(fun) == fun
+      assert Client.before_send({Redactor, :redact}) == {Redactor, :redact}
+    end
+
+    test "refuses what cannot be called with a report" do
+      assert_raise ArgumentError, ~r/Redactor.missing\/1 is not defined/, fn ->
+        Client.before_send({Redactor, :missing})
+      end
+
+      assert_raise ArgumentError, ~r/must be a {module, function} tuple or a function/, fn ->
+        Client.before_send(fn -> :ok end)
+      end
+    end
+
+    test "sends what the callback returns in place of the report" do
+      start_client([], before_send: {Redactor, :redact})
+      :ok = emit()
+
+      assert_receive {:posted, _task, _url, _headers, body}
+
+      assert %{"access_token" => "token1", "data" => %{"body" => body}} =
+               body |> IO.iodata_to_binary() |> Jason.decode!()
+
+      assert body == %{"message" => %{"body" => "[redacted]"}}
+    end
+
+    test "hands the callback the data of the report, without the access token" do
+      test = self()
+
+      start_client([],
+        before_send: fn data ->
+          send(test, {:before_send, data})
+          data
+        end
+      )
+
+      :ok = emit()
+
+      assert_receive {:before_send, data}
+      assert %{"body" => @body, "environment" => "test", "level" => "error"} = data
+      refute inspect(data) =~ "token1"
+    end
+
+    test "sends nothing when the callback returns nil" do
+      start_client([], before_send: fn _data -> nil end)
+      :ok = emit()
+
+      refute_receive {:posted, _task, _url, _headers, _body}
+    end
+
+    test "sends nothing, and says so, when the callback raises" do
+      start_client([], before_send: fn _data -> raise "cannot redact" end)
+
+      log =
+        capture_log(fn ->
+          :ok = emit()
+          refute_receive {:posted, _task, _url, _headers, _body}
+        end)
+
+      assert log =~ "[error] (Rollbax) dropped report: :before_send failed"
+      assert log =~ "cannot redact"
+    end
+
+    test "sends nothing, and says so, when the callback returns something else" do
+      start_client([], before_send: fn _data -> :ok end)
+
+      log =
+        capture_log(fn ->
+          :ok = emit()
+          refute_receive {:posted, _task, _url, _headers, _body}
+        end)
+
+      assert log =~ "(Rollbax) dropped report: :before_send returned :ok instead of a map or nil"
+    end
+  end
+
   describe "the :max_concurrency and :max_queue configurations" do
     test "default to twenty at once and a thousand waiting" do
       assert Client.limit(:max_concurrency, nil, 20) == 20
