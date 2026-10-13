@@ -476,6 +476,91 @@ defmodule Rollbax.LoggerTest do
     end)
   end
 
+  describe "with Rollbax.Reporter.Messages after the standard reporter" do
+    @describetag reporters: [Rollbax.Reporter.Standard, Rollbax.Reporter.Messages]
+
+    test "an error logged without a crash reason is reported as a message" do
+      data =
+        quietly(fn ->
+          Logger.error("payment gateway unreachable")
+          assert_performed_request()["data"]
+        end)
+
+      assert data["body"] == %{"message" => %{"body" => "payment gateway unreachable"}}
+      assert data["level"] == "error"
+      assert %{"file" => file, "line" => line, "function" => function} = data["custom"]
+      assert file =~ "logger_test.exs"
+      assert is_integer(line)
+      assert function =~ "Rollbax.LoggerTest"
+    end
+
+    test "an event logged above error is reported as critical" do
+      data =
+        quietly(fn ->
+          Logger.critical("disk full")
+          assert_performed_request()["data"]
+        end)
+
+      assert data["level"] == "critical"
+      assert data["body"] == %{"message" => %{"body" => "disk full"}}
+    end
+
+    test "a crash is still reported as an exception, by the standard reporter" do
+      capture_log(fn ->
+        spawn(fn -> raise "oops" end)
+
+        assert %{"trace" => %{"exception" => %{"message" => "oops"}}} =
+                 assert_performed_request()["data"]["body"]
+
+        refute_receive {:api_request, _body}
+      end)
+    end
+
+    test "a report logged as a map is reported inspected" do
+      data =
+        quietly(fn ->
+          Logger.error(%{event: :import_failed, rows: 3})
+          assert_performed_request()["data"]
+        end)
+
+      assert data["body"]["message"]["body"] =~ "import_failed"
+    end
+
+    test "a long message is cut" do
+      body =
+        quietly(fn ->
+          Logger.error(String.duplicate("é", 6_000))
+          assert_performed_request()["data"]["body"]["message"]["body"]
+        end)
+
+      assert body == String.duplicate("é", 4_000) <> " (truncated)"
+    end
+
+    test "none of the event's other metadata is sent" do
+      custom =
+        quietly(fn ->
+          Logger.error("failed", user_token: "s3cr3t")
+          assert_performed_request()["data"]["custom"]
+        end)
+
+      assert Map.keys(custom) -- ["file", "line", "function"] == []
+    end
+
+    test "what is logged below error is not reported" do
+      capture_log(fn ->
+        Logger.warning("slow response")
+        refute_receive {:api_request, _body}
+      end)
+    end
+
+    test "what Rollbax logs itself is not reported" do
+      capture_log(fn ->
+        Logger.error("(Rollbax) connection error", rollbax: false)
+        refute_receive {:api_request, _body}
+      end)
+    end
+  end
+
   @tag reporters: [Rollbax.Reporter.Silencing]
   test "reporters can skip events" do
     capture_log(fn ->

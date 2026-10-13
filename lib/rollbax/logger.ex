@@ -18,6 +18,9 @@ defmodule Rollbax.Logger do
     * when the callback returns a `Rollbax.Exception` struct, the exception is reported to Rollbar
       and no other reporters are called
 
+    * when the callback returns a `Rollbax.Message` struct, the message is reported to Rollbar
+      and no other reporters are called
+
     * when the callback returns `:next`, the reporter is skipped and Rollbax moves on to the next
       reporter
 
@@ -27,8 +30,9 @@ defmodule Rollbax.Logger do
 
   The list of reporters can be configured in the `:reporters` key in the `:rollbax` application
   configuration. By default this list only contains `Rollbax.Reporter.Standard` (see its
-  documentation for more information). Rollbax also comes equipped with a
-  `Rollbax.Reporter.Silencing` reporter that doesn't report anything it receives. For examples on
+  documentation for more information). Rollbax also comes equipped with
+  `Rollbax.Reporter.Messages`, which reports the errors logged without a crash behind them, and
+  with a `Rollbax.Reporter.Silencing` reporter that doesn't report anything it receives. For examples on
   how to provide your own reporters, look at the source for `Rollbax.Reporter.Standard`.
 
   Events logged on another node, and the ones Rollbax logs itself, never reach the reporters.
@@ -90,6 +94,14 @@ defmodule Rollbax.Logger do
     case reporter.handle_event(level, event) do
       %Rollbax.Exception{} = exception ->
         Rollbax.report_exception(exception)
+
+      %Rollbax.Message{} = message ->
+        Rollbax.report_message(
+          message.level,
+          message.body,
+          message.custom,
+          message.occurrence_data
+        )
 
       :next ->
         run_reporters(rest, level, event)

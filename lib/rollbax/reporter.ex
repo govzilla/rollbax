@@ -12,5 +12,5 @@ defmodule Rollbax.Reporter do
   in `event.meta.crash_reason`.
   """
   @callback handle_event(level :: :logger.level(), event :: :logger.log_event()) ::
-              Rollbax.Exception.t() | :next | :ignore
+              Rollbax.Exception.t() | Rollbax.Message.t() | :next | :ignore
 end
