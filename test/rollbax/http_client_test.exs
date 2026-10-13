@@ -307,7 +307,12 @@ defmodule Rollbax.HTTPClientTest do
 
       log =
         capture_log(fn ->
-          Enum.each(1..6, fn _ -> :ok = emit() end)
+          # One at a time: reports that pile up in the mailbox are dropped before the
+          # client sees them, which is not what this test is about.
+          Enum.each(1..6, fn _ ->
+            :ok = emit()
+            :sys.get_state(client)
+          end)
 
           tasks =
             for _ <- 1..2 do
