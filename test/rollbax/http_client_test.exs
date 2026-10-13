@@ -288,6 +288,48 @@ defmodule Rollbax.HTTPClientTest do
     assert {:error, {:not_found, Rollbax.Logger}} = :logger.get_handler_config(Rollbax.Logger)
   end
 
+  describe "the :max_concurrency and :max_queue configurations" do
+    test "default to twenty at once and a thousand waiting" do
+      assert Client.limit(:max_concurrency, nil, 20) == 20
+      assert Client.limit(:max_queue, nil, 1_000) == 1_000
+    end
+
+    for value <- [0, -1, 1.5, "10"] do
+      test "refuse #{inspect(value)}" do
+        assert_raise ArgumentError, ~r/:max_queue must be a positive integer/, fn ->
+          Client.limit(:max_queue, unquote(value), 1_000)
+        end
+      end
+    end
+
+    test "decide how many reports are posted at once and how many wait" do
+      client = start_client([hold: true], max_concurrency: 2, max_queue: 3)
+
+      log =
+        capture_log(fn ->
+          Enum.each(1..6, fn _ -> :ok = emit() end)
+
+          tasks =
+            for _ <- 1..2 do
+              assert_receive {:posted, task, _url, _headers, _body}
+              task
+            end
+
+          refute_receive {:posted, _task, _url, _headers, _body}
+          assert %{waiting_count: 3} = :sys.get_state(client)
+
+          Enum.each(tasks, &send(&1, :answer))
+
+          for _ <- 1..3 do
+            assert_receive {:posted, task, _url, _headers, _body}
+            send(task, :answer)
+          end
+        end)
+
+      assert log =~ "(Rollbax) dropped report: 3 reports are already waiting to be sent"
+    end
+  end
+
   describe "the :report_timeout configuration" do
     test "defaults to a minute" do
       assert Client.report_timeout(nil) == 60_000

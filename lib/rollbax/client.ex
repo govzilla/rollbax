@@ -17,8 +17,9 @@ defmodule Rollbax.Client do
 
   @name __MODULE__
   @headers [{"content-type", "application/json"}]
-  @max_reports_in_flight 20
-  @max_reports_waiting 1_000
+  @default_max_concurrency 20
+  @default_max_queue 1_000
+  @max_queue_key {__MODULE__, :max_queue}
   @default_report_timeout 60_000
   # The longest wait an Erlang timer takes, in milliseconds.
   @max_timer 4_294_967_295
@@ -36,6 +37,8 @@ defmodule Rollbax.Client do
     rate_limited?: false,
     rate_limit_timer: nil,
     report_timeout: @default_report_timeout,
+    max_concurrency: @default_max_concurrency,
+    max_queue: @default_max_queue,
     in_flight: %{},
     waiting: :queue.new(),
     waiting_count: 0
@@ -49,7 +52,10 @@ defmodule Rollbax.Client do
       url: config[:api_endpoint],
       enabled: config[:enabled],
       http_client: http_client(config[:http_client]),
-      report_timeout: report_timeout(config[:report_timeout])
+      report_timeout: report_timeout(config[:report_timeout]),
+      max_concurrency:
+        limit(:max_concurrency, config[:max_concurrency], @default_max_concurrency),
+      max_queue: limit(:max_queue, config[:max_queue], @default_max_queue)
     }
 
     GenServer.start_link(__MODULE__, state, name: @name)
@@ -79,6 +85,16 @@ defmodule Rollbax.Client do
   def http_client(other) do
     raise ArgumentError,
           ":http_client must be a module or a {module, options} tuple, got: #{inspect(other)}"
+  end
+
+  @doc """
+  Returns the `:max_concurrency` or `:max_queue` configuration `value`, or `default`.
+  """
+  def limit(_name, nil, default), do: default
+  def limit(_name, value, _default) when is_integer(value) and value > 0, do: value
+
+  def limit(name, other, _default) do
+    raise ArgumentError, "#{inspect(name)} must be a positive integer, got: #{inspect(other)}"
   end
 
   @doc """
@@ -127,8 +143,11 @@ defmodule Rollbax.Client do
 
   defp mailbox_has_room?(pid) do
     case Process.info(pid, :message_queue_len) do
-      {:message_queue_len, length} -> length < @max_reports_waiting
-      nil -> true
+      {:message_queue_len, length} ->
+        length < :persistent_term.get(@max_queue_key, @default_max_queue)
+
+      nil ->
+        true
     end
   end
 
@@ -138,6 +157,8 @@ defmodule Rollbax.Client do
   def init(%__MODULE__{} = state) do
     Logger.metadata(rollbax: false)
     {:ok, task_supervisor} = Task.Supervisor.start_link()
+    # Read by emit/5, which runs in the process reporting.
+    :persistent_term.put(@max_queue_key, state.max_queue)
     {:ok, %{state | task_supervisor: task_supervisor}}
   end
 
@@ -232,10 +253,10 @@ defmodule Rollbax.Client do
 
   defp post_or_enqueue(payload, %__MODULE__{} = state) do
     cond do
-      map_size(state.in_flight) < @max_reports_in_flight ->
+      map_size(state.in_flight) < state.max_concurrency ->
         post(payload, state)
 
-      state.waiting_count < @max_reports_waiting ->
+      state.waiting_count < state.max_queue ->
         %{
           state
           | waiting: :queue.in(payload, state.waiting),
@@ -244,7 +265,7 @@ defmodule Rollbax.Client do
 
       true ->
         Logger.error(
-          "(Rollbax) dropped report: #{@max_reports_waiting} reports are already waiting to be sent"
+          "(Rollbax) dropped report: #{state.max_queue} reports are already waiting to be sent"
         )
 
         state

@@ -42,6 +42,12 @@ defmodule Rollbax do
     * `:report_timeout` - (milliseconds) how long the HTTP client is given to post a report
       before the attempt is abandoned. Defaults to `60_000`.
 
+    * `:max_concurrency` - (positive integer) how many reports are posted at once. Defaults
+      to `20`.
+
+    * `:max_queue` - (positive integer) how many reports wait their turn while that many are
+      being posted. A report that finds the queue full is dropped. Defaults to `1_000`.
+
     * `:http_client` - (module or `{module, options}`) the `Rollbax.HTTPClient` that posts the
       reports. Defaults to `Rollbax.HTTPClient.Req`, which needs the `:req` dependency. The
       options are handed to the client on every request; for the default client they are
@@ -97,6 +103,8 @@ defmodule Rollbax do
     # Fails here, at startup, when the client cannot be used.
     {_module, _options} = Rollbax.Client.http_client(config[:http_client])
     _timeout = Rollbax.Client.report_timeout(config[:report_timeout])
+    _limit = Rollbax.Client.limit(:max_concurrency, config[:max_concurrency], nil)
+    _limit = Rollbax.Client.limit(:max_queue, config[:max_queue], nil)
 
     children = [
       {Rollbax.Client, config}
@@ -131,7 +139,9 @@ defmodule Rollbax do
         :reporters,
         :proxy,
         :http_client,
-        :report_timeout
+        :report_timeout,
+        :max_concurrency,
+        :max_queue
       ])
       |> put_if_present(:environment, env[:environment])
       |> put_if_present(:access_token, env[:access_token])
