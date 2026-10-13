@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.12.0
+
+This is the first release of Govzilla's fork.
+
+* **BREAKING CHANGE**: Reports are posted through a `Rollbax.HTTPClient`, configured with `:http_client`. The default, `Rollbax.HTTPClient.Req`, is built on Req, which is now an optional dependency: add `{:req, "~> 0.5"}` to your dependencies or configure a client of your own. hackney is no longer used.
+* **BREAKING CHANGE**: Removed the `:proxy` option, which was a hackney option. Give the proxy to the HTTP client instead, for example `http_client: {Rollbax.HTTPClient.Req, connect_options: [proxy: {:http, host, port, []}]}`. Rollbax refuses to start while `:proxy` is set.
+* **BREAKING CHANGE**: `Rollbax.Logger` is a `:logger` handler instead of an `:error_logger` handler. On current Erlang and Elixir the `:error_logger` handler received nothing, so crash reports were not being sent. Reporters now receive the `:logger` event in `c:Rollbax.Reporter.handle_event/2`, and `Rollbax.Reporter.Standard` reports every event that carries a `:crash_reason`.
+* **BREAKING CHANGE**: A crash report carries the logged message as the `"log"` custom value, in place of the `"name"`, `"last_message"`, `"state"` and similar values.
+* **BREAKING CHANGE**: Increased Elixir version requirement to 1.15 and higher.
+* At most 20 reports are posted at once and up to 1,000 wait their turn; beyond that reports are dropped and the drop is logged.
+* The rate limiting header is read whatever its case.
+* The "unexpected API status" log no longer includes the reason phrase.
+* Fixed the warnings current Elixir versions emit.
+
 ## v0.11.0
 
 * Added handling of rate limiting from the Rollbar API.

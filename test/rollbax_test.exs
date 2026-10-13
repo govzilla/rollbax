@@ -2,11 +2,8 @@ defmodule RollbaxTest do
   use ExUnit.RollbaxCase
 
   setup_all do
-    {:ok, pid} = start_rollbax_client("token1", "test")
-
-    on_exit(fn ->
-      ensure_rollbax_client_down(pid)
-    end)
+    {:ok, _pid} = start_rollbax_client("token1", "test")
+    :ok
   end
 
   setup do
@@ -16,7 +13,7 @@ defmodule RollbaxTest do
 
   describe "report/5" do
     test "with an error" do
-      stacktrace = [{Test, :report, 2, [file: 'file.exs', line: 16]}]
+      stacktrace = [{Test, :report, 2, [file: ~c"file.exs", line: 16]}]
       exception = RuntimeError.exception("pass")
       :ok = Rollbax.report(:error, exception, stacktrace, %{}, %{uuid: "d4c7"})
 
@@ -41,16 +38,16 @@ defmodule RollbaxTest do
     end
 
     test "with an error that is not an exception" do
-      stacktrace = [{Test, :report, 2, [file: 'file.exs', line: 16]}]
+      stacktrace = [{Test, :report, 2, [file: ~c"file.exs", line: 16]}]
       error = {:badmap, nil}
       :ok = Rollbax.report(:error, error, stacktrace, %{}, %{})
 
-      assert %{"class" => "BadMapError", "message" => "expected a map, got: nil"} =
+      assert %{"class" => "BadMapError", "message" => "expected a map, got:" <> _} =
                assert_performed_request()["data"]["body"]["trace"]["exception"]
     end
 
     test "with an exit" do
-      stacktrace = [{Test, :report, 2, [file: 'file.exs', line: 16]}]
+      stacktrace = [{Test, :report, 2, [file: ~c"file.exs", line: 16]}]
       :ok = Rollbax.report(:exit, :oops, stacktrace)
 
       assert %{
@@ -72,7 +69,7 @@ defmodule RollbaxTest do
     end
 
     test "with an exit where the term is an exception" do
-      stacktrace = [{Test, :report, 2, [file: 'file.exs', line: 16]}]
+      stacktrace = [{Test, :report, 2, [file: ~c"file.exs", line: 16]}]
 
       exception =
         try do
@@ -88,7 +85,7 @@ defmodule RollbaxTest do
     end
 
     test "with a throw" do
-      stacktrace = [{Test, :report, 2, [file: 'file.exs', line: 16]}]
+      stacktrace = [{Test, :report, 2, [file: ~c"file.exs", line: 16]}]
       :ok = Rollbax.report(:throw, :oops, stacktrace)
 
       assert %{
@@ -110,11 +107,11 @@ defmodule RollbaxTest do
     end
 
     test "includes stacktraces in the function name if there's an application" do
-      # Let's use some modules that belong to an application and some that don't.
+      # Let~c"s use some modules that belong to an application and some that don"t.
       stacktrace = [
-        {:crypto, :strong_rand_bytes, 1, [file: 'crypto.erl', line: 1]},
-        {List, :to_string, 1, [file: 'list.ex', line: 10]},
-        {NoApp, :for_this_module, 3, [file: 'nofile.ex', line: 1]}
+        {:crypto, :strong_rand_bytes, 1, [file: ~c"crypto.erl", line: 1]},
+        {List, :to_string, 1, [file: ~c"list.ex", line: 10]},
+        {NoApp, :for_this_module, 3, [file: ~c"nofile.ex", line: 1]}
       ]
 
       :ok = Rollbax.report(:throw, :oops, stacktrace)

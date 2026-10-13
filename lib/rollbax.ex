@@ -39,9 +39,11 @@ defmodule Rollbax do
 
     * `:reporters` - see `Rollbax.Logger`.
 
-    * `:proxy` - (binary) a proxy that can be used to connect to the Rollbar host. For more
-      information about the format of the proxy, check the proxy URL description in the
-      [hackney documentation](https://github.com/benoitc/hackney#proxy-a-connection).
+    * `:http_client` - (module or `{module, options}`) the `Rollbax.HTTPClient` that posts the
+      reports. Defaults to `Rollbax.HTTPClient.Req`, which needs the `:req` dependency. The
+      options are handed to the client on every request; for the default client they are
+      [Req options](https://hexdocs.pm/req/Req.html#new/1), so that is where timeouts or a proxy
+      are set.
 
   ## Runtime configuration
 
@@ -61,10 +63,10 @@ defmodule Rollbax do
         end
       end
 
-  ## Logger backend
+  ## Crash reports
 
-  Rollbax provides a module that reports logged crashes and exits to Rollbar. For more
-  information, look at the documentation for `Rollbax.Logger`.
+  Rollbax provides a `:logger` handler that reports logged crashes and exits to Rollbar. For
+  more information, look at the documentation for `Rollbax.Logger`.
   """
 
   use Application
@@ -75,6 +77,12 @@ defmodule Rollbax do
   def start(_type, _args) do
     config = init_config()
 
+    if config[:proxy] do
+      raise ArgumentError,
+            ":proxy is no longer supported. Give the proxy to the HTTP client instead, for example " <>
+              "http_client: {Rollbax.HTTPClient.Req, connect_options: [proxy: {:http, host, port, []}]}"
+    end
+
     unless config[:enabled] in [true, false, :log] do
       raise ArgumentError, ":enabled may be only one of: true, false, or :log"
     end
@@ -83,10 +91,11 @@ defmodule Rollbax do
       raise ArgumentError, ":access_token is required when :enabled is true"
     end
 
+    # Fails here, at startup, when the client cannot be used.
+    {_module, _options} = Rollbax.Client.http_client(config[:http_client])
+
     if config[:enable_crash_reports] do
-      # We do this because the handler will read `:reporters` out of the app's environment.
-      Application.put_env(:rollbax, :reporters, config[:reporters])
-      :error_logger.add_report_handler(Rollbax.Logger)
+      :ok = Rollbax.Logger.attach(config[:reporters] || [Rollbax.Reporter.Standard])
     end
 
     children = [
@@ -94,6 +103,12 @@ defmodule Rollbax do
     ]
 
     Supervisor.start_link(children, strategy: :one_for_one)
+  end
+
+  @doc false
+  def stop(_state) do
+    _ = Rollbax.Logger.detach()
+    :ok
   end
 
   defp init_config() do
@@ -107,7 +122,8 @@ defmodule Rollbax do
         :api_endpoint,
         :enable_crash_reports,
         :reporters,
-        :proxy
+        :proxy,
+        :http_client
       ])
       |> put_if_present(:environment, env[:environment])
       |> put_if_present(:access_token, env[:access_token])
@@ -157,7 +173,8 @@ defmodule Rollbax do
 
   Exceptions can be reported directly:
 
-      Rollbax.report(:error, ArgumentError.exception("oops"), System.stacktrace())
+      {:current_stacktrace, stacktrace} = Process.info(self(), :current_stacktrace)
+      Rollbax.report(:error, ArgumentError.exception("oops"), stacktrace)
       #=> :ok
 
   Often, you'll want to report something you either rescued or caught. For
@@ -167,7 +184,7 @@ defmodule Rollbax do
         raise ArgumentError, "oops"
       rescue
         exception ->
-          Rollbax.report(:error, exception, System.stacktrace())
+          Rollbax.report(:error, exception, __STACKTRACE__)
           # You can also reraise the exception here with reraise/2
       end
 
@@ -178,12 +195,12 @@ defmodule Rollbax do
         # or exit(:oops)
       catch
         kind, value ->
-          Rollbax.report(kind, value, System.stacktrace())
+          Rollbax.report(kind, value, __STACKTRACE__)
       end
 
   Using custom data:
 
-      Rollbax.report(:exit, :oops, System.stacktrace(), %{"weather" => "rainy"})
+      Rollbax.report(:exit, :oops, stacktrace, %{"weather" => "rainy"})
 
   """
   @spec report(:error | :exit | :throw, any, [any], map, map) :: :ok

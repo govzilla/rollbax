@@ -2,158 +2,102 @@ defmodule Rollbax.Reporter.Standard do
   @moduledoc """
   A `Rollbax.Reporter` that translates crashes and exits from processes to nicely-formatted
   Rollbar exceptions.
+
+  It reports the events that carry a `:crash_reason` in their metadata, which is how Elixir
+  logs a GenServer, a task, a state machine or a plain process that terminated abnormally.
+  Libraries that log their own crashes that way are reported too. Everything else is left to
+  the next reporter.
+
+  The logged message is sent as the `"log"` custom value. For a GenServer it holds the last
+  message it received, and its state as well when the Logger level is `:debug`.
   """
 
   @behaviour Rollbax.Reporter
 
-  def handle_event(:error, {_pid, format, data}) do
-    handle_error_format(format, data)
+  # The longest logged message sent along with an exception.
+  @max_log_bytes 8_000
+
+  @impl true
+  def handle_event(_level, %{meta: %{crash_reason: {reason, stacktrace}}} = event)
+      when is_list(stacktrace) do
+    log = logged_message(event)
+    {class, message} = class_and_message(terminated(event, log), reason, stacktrace)
+
+    %Rollbax.Exception{
+      class: class,
+      message: message,
+      stacktrace: stacktrace,
+      custom: custom(log)
+    }
   end
 
-  def handle_event(_type, _event) do
+  def handle_event(_level, _event) do
     :next
   end
 
-  # Errors in a GenServer.
-  defp handle_error_format('** Generic server ' ++ _, [name, last_message, state, reason]) do
-    {class, message, stacktrace} = format_as_exception(reason, "GenServer terminating")
+  # What terminated. Elixir 1.19 and later hand the handler the report OTP logged, with its
+  # label; earlier versions hand it the translated message, which opens by naming it.
+  defp terminated(%{msg: {:report, %{label: label}}}, _log), do: terminated_by_label(label)
+  defp terminated(_event, log), do: terminated_by_message(log)
 
-    %Rollbax.Exception{
-      class: class,
-      message: message,
-      stacktrace: stacktrace,
-      custom: %{
-        "name" => inspect(name),
-        "last_message" => inspect(last_message),
-        "state" => inspect(state)
-      }
-    }
-  end
+  defp terminated_by_label({:gen_server, :terminate}), do: "GenServer terminating"
+  defp terminated_by_label({Task.Supervisor, :terminating}), do: "Task terminating"
+  defp terminated_by_label({:gen_statem, :terminate}), do: "State machine terminating"
+  defp terminated_by_label({:gen_event, :terminate}), do: "gen_event handler terminating"
+  defp terminated_by_label(_label), do: nil
 
-  # Errors in a GenEvent handler.
-  defp handle_error_format('** gen_event handler ' ++ _, [
-         name,
-         manager,
-         last_message,
-         state,
-         reason
-       ]) do
-    {class, message, stacktrace} = format_as_exception(reason, "gen_event handler terminating")
+  defp terminated_by_message("GenServer " <> _), do: "GenServer terminating"
+  defp terminated_by_message("Task " <> _), do: "Task terminating"
+  defp terminated_by_message(":gen_statem " <> _), do: "State machine terminating"
+  defp terminated_by_message(":gen_event handler " <> _), do: "gen_event handler terminating"
+  defp terminated_by_message("Process " <> _), do: "error in process"
+  defp terminated_by_message(_log), do: nil
 
-    %Rollbax.Exception{
-      class: class,
-      message: message,
-      stacktrace: stacktrace,
-      custom: %{
-        "name" => inspect(name),
-        "manager" => inspect(manager),
-        "last_message" => inspect(last_message),
-        "state" => inspect(state)
-      }
-    }
-  end
+  defp class_and_message(terminated, reason, stacktrace) do
+    case normalize(reason, stacktrace) do
+      {:exception, exception} ->
+        {with_detail(terminated, inspect(exception.__struct__)), Exception.message(exception)}
 
-  # Errors in a task.
-  defp handle_error_format('** Task ' ++ _, [name, starter, function, arguments, reason]) do
-    {class, message, stacktrace} = format_as_exception(reason, "Task terminating")
+      :exit ->
+        {terminated || "exit", Exception.format_exit(reason)}
 
-    %Rollbax.Exception{
-      class: class,
-      message: message,
-      stacktrace: stacktrace,
-      custom: %{
-        "name" => inspect(name),
-        "started_from" => inspect(starter),
-        "function" => inspect(function),
-        "arguments" => inspect(arguments)
-      }
-    }
-  end
-
-  defp handle_error_format('** State machine ' ++ _ = message, data) do
-    if charlist_contains?(message, 'Callback mode') do
-      :next
-    else
-      handle_gen_fsm_error(data)
+      :stop ->
+        {with_detail(terminated, "stop"), Exception.format_exit(reason)}
     end
   end
 
-  # Errors in a regular process.
-  defp handle_error_format('Error in process ' ++ _, [pid, {reason, stacktrace}]) do
-    exception = Exception.normalize(:error, reason)
+  defp normalize(reason, _stacktrace) when is_exception(reason), do: {:exception, reason}
 
-    %Rollbax.Exception{
-      class: "error in process (#{inspect(exception.__struct__)})",
-      message: Exception.message(exception),
-      stacktrace: stacktrace,
-      custom: %{
-        "pid" => inspect(pid)
-      }
-    }
-  end
-
-  # Any other error (for example, the ones logged through
-  # :error_logger.error_msg/1). This reporter doesn't report those to Rollbar.
-  defp handle_error_format(_format, _data) do
-    :next
-  end
-
-  defp handle_gen_fsm_error([name, last_event, state, data, reason]) do
-    {class, message, stacktrace} = format_as_exception(reason, "State machine terminating")
-
-    %Rollbax.Exception{
-      class: class,
-      message: message,
-      stacktrace: stacktrace,
-      custom: %{
-        "name" => inspect(name),
-        "last_event" => inspect(last_event),
-        "state" => inspect(state),
-        "data" => inspect(data)
-      }
-    }
-  end
-
-  defp handle_gen_fsm_error(_data) do
-    :next
-  end
-
-  defp format_as_exception({maybe_exception, [_ | _] = maybe_stacktrace} = reason, class) do
-    # We do this &Exception.format_stacktrace_entry/1 dance just to ensure that
-    # "maybe_stacktrace" is a valid stacktrace. If it's not,
-    # Exception.format_stacktrace_entry/1 will raise an error and we'll treat it
-    # as not a stacktrace.
-    try do
-      Enum.each(maybe_stacktrace, &Exception.format_stacktrace_entry/1)
-    catch
-      :error, _ ->
-        format_stop_as_exception(reason, class)
-    else
-      :ok ->
-        format_error_as_exception(maybe_exception, maybe_stacktrace, class)
-    end
-  end
-
-  defp format_as_exception(reason, class) do
-    format_stop_as_exception(reason, class)
-  end
-
-  defp format_stop_as_exception(reason, class) do
-    {class <> " (stop)", Exception.format_exit(reason), _stacktrace = []}
-  end
-
-  defp format_error_as_exception(reason, stacktrace, class) do
+  # An Erlang error that Elixir knows as an exception, such as `{:badmap, term}`, may arrive
+  # as the bare reason. Anything else that comes with a stacktrace is an exit.
+  defp normalize(reason, [_ | _] = stacktrace) do
     case Exception.normalize(:error, reason, stacktrace) do
-      %ErlangError{} ->
-        {class, Exception.format_exit(reason), stacktrace}
-
-      exception ->
-        class = class <> " (" <> inspect(exception.__struct__) <> ")"
-        {class, Exception.message(exception), stacktrace}
+      %ErlangError{} -> :exit
+      exception -> {:exception, exception}
     end
   end
 
-  defp charlist_contains?(charlist, part) do
-    :string.str(charlist, part) != 0
+  # No stacktrace: the process was told to stop, or returned a stop of its own.
+  defp normalize(_reason, []), do: :stop
+
+  defp with_detail(nil, detail), do: detail
+  defp with_detail(terminated, detail), do: terminated <> " (" <> detail <> ")"
+
+  defp logged_message(%{msg: {:string, chardata}}), do: to_log(chardata)
+  defp logged_message(%{msg: {:report, %{elixir_translation: chardata}}}), do: to_log(chardata)
+  defp logged_message(_event), do: ""
+
+  defp to_log(chardata) do
+    IO.chardata_to_string(chardata)
+  rescue
+    _error -> ""
   end
+
+  defp custom(""), do: %{}
+
+  defp custom(log) when byte_size(log) > @max_log_bytes do
+    %{"log" => String.slice(log, 0, @max_log_bytes) <> " (truncated)"}
+  end
+
+  defp custom(log), do: %{"log" => log}
 end

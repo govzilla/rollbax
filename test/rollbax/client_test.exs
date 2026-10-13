@@ -4,11 +4,8 @@ defmodule Rollbax.ClientTest do
   alias Rollbax.Client
 
   setup_all do
-    {:ok, pid} = start_rollbax_client("token1", "test", %{qux: "custom"})
-
-    on_exit(fn ->
-      ensure_rollbax_client_down(pid)
-    end)
+    {:ok, _pid} = start_rollbax_client("token1", "test", %{qux: "custom"})
+    :ok
   end
 
   setup do
@@ -72,7 +69,7 @@ defmodule Rollbax.ClientTest do
         :ok = Client.emit(:error, System.system_time(:second), payload, %{}, %{})
       end)
 
-    assert log =~ "[error] (Rollbax) connection error: :econnrefused"
+    assert log =~ "[error] (Rollbax) connection error: connection refused"
     refute_receive {:api_request, _body}
   end
 
@@ -85,7 +82,7 @@ defmodule Rollbax.ClientTest do
           Client.emit(:error, System.system_time(:second), body, %{rate_limit_seconds: "1"}, %{})
       end)
 
-    assert log =~ "unexpected API status: 429/Too Many Requests"
+    assert log =~ "[error] (Rollbax) unexpected API status: 429"
 
     assert_performed_request()
 

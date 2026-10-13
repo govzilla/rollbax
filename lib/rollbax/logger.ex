@@ -1,22 +1,17 @@
 defmodule Rollbax.Logger do
   @moduledoc """
-  A module that can be used to report crashes and exits to Rollbar.
+  A `:logger` handler that reports crashes and exits to Rollbar.
 
-  In Elixir and Erlang, crashes from GenServers and other processes are reported through
-  `:error_logger`. When installed, this module installs an `:error_logger` handler that can be
-  used to report such crashes to Rollbar automatically.
+  When a GenServer, a task or any other process crashes, Elixir logs it with the reason
+  and the stacktrace in the `:crash_reason` metadata. This handler turns those events
+  into Rollbar exceptions.
 
-  In order to use this functionality, you must configure the `:rollbax` application to report
-  crashes with:
+  It is installed by the `:rollbax` application when crash reports are enabled:
 
       config :rollbax, :enable_crash_reports, true
 
-  All the configuration options for reporting crashes are documented in detail below. If you are
-  upgrading from an older version of Rollbax that used this module as a logger backend via
-  `config :logger, backends: [:console, Rollbax.Logger]` this config should be removed.
-
   `Rollbax.Logger` implements a mechanism of reporting based on *reporters*, which are modules
-  that implement the `Rollbax.Reporter` behaviour. Every message received by `Rollbax.Logger` is
+  that implement the `Rollbax.Reporter` behaviour. Every event received by `Rollbax.Logger` is
   run through a list of reporters and the behaviour is determined by the return value of each
   reporter's `c:Rollbax.Reporter.handle_event/2` callback:
 
@@ -26,8 +21,9 @@ defmodule Rollbax.Logger do
     * when the callback returns `:next`, the reporter is skipped and Rollbax moves on to the next
       reporter
 
-    * when the callback returns `:ignore`, the reported message is ignored and no more reporters
-      are tried.
+    * when the callback returns `:ignore`, the event is ignored and no more reporters are tried.
+
+  An event no reporter turns into an exception is not reported.
 
   The list of reporters can be configured in the `:reporters` key in the `:rollbax` application
   configuration. By default this list only contains `Rollbax.Reporter.Standard` (see its
@@ -35,61 +31,54 @@ defmodule Rollbax.Logger do
   `Rollbax.Reporter.Silencing` reporter that doesn't report anything it receives. For examples on
   how to provide your own reporters, look at the source for `Rollbax.Reporter.Standard`.
 
+  Events logged on another node, and the ones Rollbax logs itself, never reach the reporters.
+
   ## Configuration
 
   The following reporting-related options can be used to configure the `:rollbax` application:
 
-    * `:enable_crash_reports` (boolean) - when `true`, `Rollbax.Logger` is registered as an
-      `:error_logger` handler and the whole reporting flow described above is executed.
+    * `:enable_crash_reports` (boolean) - when `true`, `Rollbax.Logger` is added as a `:logger`
+      handler and the whole reporting flow described above is executed.
 
     * `:reporters` (list) - a list of modules implementing the `Rollbax.Reporter` behaviour.
       Defaults to `[Rollbax.Reporter.Standard]`.
 
   """
 
-  @behaviour :gen_event
-
-  defstruct [:reporters]
+  @handler_id __MODULE__
 
   @doc false
-  def init(_args) do
-    reporters = Application.get_env(:rollbax, :reporters, [Rollbax.Reporter.Standard])
-    {:ok, %__MODULE__{reporters: reporters}}
+  @spec attach([module]) :: :ok | {:error, term}
+  def attach(reporters) when is_list(reporters) do
+    _ = :logger.remove_handler(@handler_id)
+
+    :logger.add_handler(@handler_id, __MODULE__, %{level: :error, config: %{reporters: reporters}})
   end
 
   @doc false
-  def handle_event(event, state)
-
-  # If the event is on a different node than the current node, we ignore it.
-  def handle_event({_level, gl, _event}, state)
-      when node(gl) != node() do
-    {:ok, state}
+  @spec detach() :: :ok | {:error, term}
+  def detach() do
+    :logger.remove_handler(@handler_id)
   end
 
-  def handle_event({level, _gl, event}, %__MODULE__{reporters: reporters} = state) do
-    :ok = run_reporters(reporters, level, event)
-    {:ok, state}
-  end
-
+  # :logger handler callback. It runs in the process that logged the event, and a handler
+  # that raises is removed, so nothing a reporter does may escape from here.
   @doc false
-  def handle_call(request, _state) do
-    exit({:bad_call, request})
-  end
+  def log(%{level: level, meta: meta} = event, %{config: %{reporters: reporters}}) do
+    if reportable?(meta) do
+      try do
+        run_reporters(reporters, level, event)
+      catch
+        _kind, _reason -> :ok
+      end
+    end
 
-  @doc false
-  def handle_info(_message, state) do
-    {:ok, state}
-  end
-
-  @doc false
-  def terminate(_reason, _state) do
     :ok
   end
 
-  @doc false
-  def code_change(_old_vsn, state, _extra) do
-    {:ok, state}
-  end
+  defp reportable?(%{rollbax: false}), do: false
+  defp reportable?(%{gl: gl}) when node(gl) != node(), do: false
+  defp reportable?(_meta), do: true
 
   defp run_reporters([reporter | rest], level, event) do
     case reporter.handle_event(level, event) do
@@ -104,9 +93,6 @@ defmodule Rollbax.Logger do
     end
   end
 
-  # If no reporter ignored or reported this event, then we're gonna report this
-  # as a Rollbar "message" with the same logic that Logger uses to translate
-  # messages (so that it will have Elixir syntax when reported).
   defp run_reporters([], _level, _event) do
     :ok
   end

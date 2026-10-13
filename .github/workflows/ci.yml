@@ -9,16 +9,16 @@ on:
 jobs:
   format:
     name: Code linting
-    runs-on: ubuntu-18.04
+    runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
 
       - name: Set up Elixir environment
-        uses: erlef/setup-elixir@v1
+        uses: erlef/setup-beam@v1
         with:
-          otp-version: 21.3
-          elixir-version: 1.8
+          otp-version: "27.2"
+          elixir-version: "1.18.4"
 
       - run: mix deps.get
 
@@ -28,26 +28,32 @@ jobs:
       - name: Check compilation warnings
         run: mix compile --warnings-as-errors
 
+      - name: Check unused dependencies
+        run: mix deps.unlock --check-unused
+
   test:
-    name: Test suite
-    runs-on: ubuntu-16.04
+    name: Test suite (Elixir ${{ matrix.versions.elixir }}, OTP ${{ matrix.versions.otp }})
+    runs-on: ubuntu-latest
 
     strategy:
+      fail-fast: false
       matrix:
         versions:
-          - otp: 18.3
-            elixir: 1.5
-          - otp: 21.3
-            elixir: 1.8
+          - otp: "26.2"
+            elixir: "1.15.8"
+          - otp: "27.2"
+            elixir: "1.18.4"
+          - otp: "28"
+            elixir: "1.19"
 
     env:
       MIX_ENV: test
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
 
       - name: Set up Elixir environment
-        uses: erlef/setup-elixir@v1
+        uses: erlef/setup-beam@v1
         with:
           elixir-version: ${{ matrix.versions.elixir }}
           otp-version: ${{ matrix.versions.otp }}

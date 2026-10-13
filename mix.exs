@@ -1,7 +1,7 @@
 defmodule Rollbax.Mixfile do
   use Mix.Project
 
-  @version "0.11.0"
+  @version "0.12.0"
 
   @default_api_endpoint "https://api.rollbar.com/api/1/item/"
 
@@ -9,8 +9,7 @@ defmodule Rollbax.Mixfile do
     [
       app: :rollbax,
       version: @version,
-      elixir: "~> 1.5",
-      build_embedded: Mix.env() == :prod,
+      elixir: "~> 1.15",
       start_permanent: Mix.env() == :prod,
       description: "Exception tracking and logging from Elixir to Rollbar",
       package: package(),
@@ -20,7 +19,7 @@ defmodule Rollbax.Mixfile do
       docs: [
         main: "Rollbax",
         source_ref: "v#{@version}",
-        source_url: "https://github.com/elixir-addicts/rollbax",
+        source_url: "https://github.com/govzilla/rollbax",
         extras: ["pages/Using Rollbax in Plug-based applications.md"]
       ]
     ]
@@ -36,11 +35,11 @@ defmodule Rollbax.Mixfile do
 
   defp deps() do
     [
-      {:hackney, "~> 1.1"},
       {:jason, "~> 1.0"},
-      {:ex_doc, "~> 0.18", only: :dev, runtime: false},
-      {:plug, "~> 1.4", only: :test},
-      {:cowboy, "~> 1.1", only: :test}
+      {:req, "~> 0.5", optional: true},
+      {:ex_doc, "~> 0.34", only: :dev, runtime: false},
+      {:plug, "~> 1.16", only: :test},
+      {:bandit, "~> 1.5", only: :test}
     ]
   end
 
@@ -48,7 +47,7 @@ defmodule Rollbax.Mixfile do
     [
       maintainers: ["Aleksei Magusev", "Andrea Leopardi", "Eric Meadows-Jönsson"],
       licenses: ["ISC"],
-      links: %{"GitHub" => "https://github.com/elixir-addicts/rollbax"}
+      links: %{"GitHub" => "https://github.com/govzilla/rollbax"}
     ]
   end
 

@@ -1,9 +1,12 @@
 # Rollbax
 
-[![Build Status](https://travis-ci.org/ForzaElixir/rollbax.svg?branch=master "Build Status")](https://travis-ci.org/ForzaElixir/rollbax)
-[![Hex Version](https://img.shields.io/hexpm/v/rollbax.svg "Hex Version")](https://hex.pm/packages/rollbax)
+[![CI](https://github.com/govzilla/rollbax/actions/workflows/ci.yml/badge.svg)](https://github.com/govzilla/rollbax/actions/workflows/ci.yml)
 
 Elixir client for [Rollbar](https://rollbar.com).
+
+This is Govzilla's fork of [ForzaElixir/rollbax](https://github.com/ForzaElixir/rollbax). It posts
+reports through a pluggable HTTP client, [Req](https://hexdocs.pm/req) by default, and reports
+crashes through a `:logger` handler. See the [changelog](CHANGELOG.md) for what differs from 0.11.0.
 
 ## Installation
 
@@ -11,11 +14,14 @@ Add Rollbax as a dependency to your `mix.exs` file:
 
 ```elixir
 defp deps() do
-  [{:rollbax, ">= 0.0.0"}]
+  [
+    {:rollbax, github: "govzilla/rollbax"},
+    {:req, "~> 0.5"}
+  ]
 end
 ```
 
-Then run `mix deps.get` in your shell to fetch the dependencies. Add `:rollbax` to your list of `:applications` if you're not using `:extra_applications`.
+Then run `mix deps.get` in your shell to fetch the dependencies. `:req` is what the default HTTP client is built on; leave it out if you [configure another client](#http-client).
 
 ## Usage
 
@@ -34,7 +40,7 @@ try do
   DoesNotExist.for_sure()
 rescue
   exception ->
-    Rollbax.report(:error, exception, System.stacktrace())
+    Rollbax.report(:error, exception, __STACKTRACE__)
 end
 ```
 
@@ -48,8 +54,7 @@ Rollbax provides a way to automatically report crashes from OTP processes (GenSe
 config :rollbax, enable_crash_reports: true
 ```
 
-For more information, check out the documentation for [`Rollbax.Logger`](http://hexdocs.pm/rollbax/Rollbax.Logger.html).
-If you had previously configured `Rollbax.Logger` to be a Logger backend (for example `config :logger, backends: [Rollbax.Logger]`), you will need to remove since `Rollbax.Logger` is not a Logger backend anymore and you will get crashes if you use it as such.
+Rollbax then adds a `:logger` handler that reports every logged event carrying a crash reason: a GenServer, a task, a state machine or a plain process that terminated abnormally, and the crashes libraries log the same way. For more information, check out the documentation for `Rollbax.Logger`.
 
 ### Plug and Phoenix
 
@@ -63,19 +68,28 @@ For non-production environments error reporting can be either disabled completel
 config :rollbax, enabled: :log
 ```
 
-### Using a proxy to reach the Rollbar server
+### HTTP client
 
-For environments which require a proxy to connect to hosts outside of the network, the `:proxy` config entry can be added with a proxy URL as it's defined in the [hackney documentation](https://github.com/benoitc/hackney#proxy-a-connection).
+Reports are posted by a module implementing the `Rollbax.HTTPClient` behaviour. The default is `Rollbax.HTTPClient.Req`, and the options given next to it are passed to Req, so that is where a timeout or a proxy goes:
 
 ```elixir
-config :rollbax, proxy: "https://my-secure-proxy:5001"
+config :rollbax,
+  http_client:
+    {Rollbax.HTTPClient.Req,
+     receive_timeout: 5_000, connect_options: [proxy: {:http, "my-proxy", 3128, []}]}
+```
+
+To use another HTTP library, implement the behaviour's one callback and name the module:
+
+```elixir
+config :rollbax, http_client: MyApp.RollbarHTTPClient
 ```
 
 ## Contributing
 
-To run tests, run `$ mix test --no-start`. The `--no-start` bit is important so that tests don't fail (because of the `:rollbax` application being started without an `:access_token` specifically).
+To run the tests, run `mix test`. The project's alias adds `--no-start`, since the `:rollbax` application does not start without an `:access_token`.
 
-When making changes to the code, adhere to this [Elixir style guide](https://github.com/lexmag/elixir-style-guide).
+Run `mix format` before committing.
 
 Finally, thanks for contributing! :)
 

@@ -1,5 +1,6 @@
 Logger.configure(level: :info)
-Application.ensure_all_started(:hackney)
+{:ok, _} = Application.ensure_all_started(:req)
+{:ok, _} = Application.ensure_all_started(:bandit)
 ExUnit.start()
 
 defmodule ExUnit.RollbaxCase do
@@ -16,24 +17,17 @@ defmodule ExUnit.RollbaxCase do
         env,
         custom \\ %{},
         api_endpoint \\ "http://localhost:4004",
-        proxy \\ nil
+        http_client \\ nil
       ) do
-    Rollbax.Client.start_link(
-      api_endpoint: api_endpoint,
-      access_token: token,
-      environment: env,
-      enabled: true,
-      custom: custom,
-      proxy: proxy
+    start_supervised(
+      {Rollbax.Client,
+       api_endpoint: api_endpoint,
+       access_token: token,
+       environment: env,
+       enabled: true,
+       custom: custom,
+       http_client: http_client}
     )
-  end
-
-  def ensure_rollbax_client_down(pid) do
-    ref = Process.monitor(pid)
-
-    receive do
-      {:DOWN, ^ref, _, _, _} -> :ok
-    end
   end
 
   def capture_log(fun) do
@@ -51,19 +45,37 @@ defmodule ExUnit.RollbaxCase do
 end
 
 defmodule RollbarAPI do
-  alias Plug.Conn
-  alias Plug.Adapters.Cowboy
+  @behaviour Plug
 
-  import Conn
+  import Plug.Conn
+
+  alias Plug.Conn
+
+  @server {:rollbar_api, :server}
 
   def start(pid, port \\ 4004) do
-    Cowboy.http(__MODULE__, [test: pid], port: port)
+    {:ok, server} =
+      Bandit.start_link(plug: {__MODULE__, test: pid}, port: port, startup_log: false)
+
+    Process.unlink(server)
+    :persistent_term.put(@server, server)
+    {:ok, server}
   end
 
   def stop() do
     Process.sleep(100)
-    Cowboy.shutdown(__MODULE__.HTTP)
+
+    case :persistent_term.get(@server, nil) do
+      nil ->
+        :ok
+
+      server ->
+        :persistent_term.erase(@server)
+        if Process.alive?(server), do: Supervisor.stop(server)
+    end
+
     Process.sleep(100)
+    :ok
   end
 
   def init(opts) do

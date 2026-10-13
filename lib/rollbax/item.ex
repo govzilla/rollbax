@@ -84,7 +84,7 @@ defmodule Rollbax.Item do
 
   def exception_class_and_message(:exit, value) do
     message =
-      if Exception.exception?(value) do
+      if is_exception(value) do
         Exception.format_banner(:error, value)
       else
         Exception.format_exit(value)
