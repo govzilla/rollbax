@@ -292,6 +292,61 @@ defmodule Rollbax.HTTPClientTest do
     assert {:error, {:not_found, Rollbax.Logger}} = :logger.get_handler_config(Rollbax.Logger)
   end
 
+  describe "the :dedupe_window configuration" do
+    defp posted_custom() do
+      assert_receive {:posted, _task, _url, _headers, body}
+      body |> IO.iodata_to_binary() |> Jason.decode!() |> get_in(["data", "custom"])
+    end
+
+    test "is off by default" do
+      start_client([])
+      :ok = emit()
+      :ok = emit()
+
+      assert_receive {:posted, _task, _url, _headers, _body}
+      assert_receive {:posted, _task, _url, _headers, _body}
+    end
+
+    test "keeps a report like one just sent from being sent again" do
+      start_client([], dedupe_window: 60_000)
+      :ok = Client.emit(:error, System.system_time(:second), @body, %{attempt: 1}, %{})
+      :ok = Client.emit(:error, System.system_time(:second), @body, %{attempt: 2}, %{})
+
+      assert posted_custom() == %{"attempt" => 1}
+      refute_receive {:posted, _task, _url, _headers, _body}
+    end
+
+    test "lets through a report with another level or another body" do
+      start_client([], dedupe_window: 60_000)
+      other_body = %{"message" => %{"body" => "something else"}}
+
+      :ok = emit()
+      :ok = Client.emit(:warning, System.system_time(:second), @body, %{}, %{})
+      :ok = Client.emit(:error, System.system_time(:second), other_body, %{}, %{})
+
+      for _ <- 1..3, do: assert_receive({:posted, _task, _url, _headers, _body})
+    end
+
+    test "once the window is over, sends the next one with the count of those left out" do
+      start_client([], dedupe_window: 100)
+
+      Enum.each(1..4, fn _ -> :ok = emit() end)
+      assert posted_custom() == nil
+      refute_receive {:posted, _task, _url, _headers, _body}
+
+      :ok = emit()
+      assert posted_custom() == %{"duplicates_dropped" => 3}
+    end
+
+    for value <- [0, -5, "60000", :infinity] do
+      test "refuses #{inspect(value)}" do
+        assert_raise ArgumentError, ~r/:dedupe_window must be a number of milliseconds/, fn ->
+          Client.dedupe_window(unquote(value))
+        end
+      end
+    end
+  end
+
   describe "when the client stops" do
     # The client is flushing once it sits in flush/2, which only terminate/2 calls.
     defp await_flushing(client, attempts \\ 100) do

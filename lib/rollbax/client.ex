@@ -22,6 +22,7 @@ defmodule Rollbax.Client do
   @max_queue_key {__MODULE__, :max_queue}
   @default_report_timeout 60_000
   @default_flush_timeout 5_000
+  @max_recent 1_000
   # The longest wait an Erlang timer takes, in milliseconds.
   @max_timer 4_294_967_295
   # The longest Rollbar may ask us to hold reports for, in seconds.
@@ -42,6 +43,8 @@ defmodule Rollbax.Client do
     max_queue: @default_max_queue,
     before_send: nil,
     flush_timeout: @default_flush_timeout,
+    dedupe_window: nil,
+    recent: %{},
     in_flight: %{},
     waiting: :queue.new(),
     waiting_count: 0
@@ -75,7 +78,8 @@ defmodule Rollbax.Client do
         limit(:max_concurrency, config[:max_concurrency], @default_max_concurrency),
       max_queue: limit(:max_queue, config[:max_queue], @default_max_queue),
       before_send: before_send(config[:before_send]),
-      flush_timeout: flush_timeout(config[:flush_timeout])
+      flush_timeout: flush_timeout(config[:flush_timeout]),
+      dedupe_window: dedupe_window(config[:dedupe_window])
     }
 
     GenServer.start_link(__MODULE__, state, name: @name)
@@ -105,6 +109,20 @@ defmodule Rollbax.Client do
   def http_client(other) do
     raise ArgumentError,
           ":http_client must be a module or a {module, options} tuple, got: #{inspect(other)}"
+  end
+
+  @doc """
+  Returns the `:dedupe_window` configuration, in milliseconds, or `nil` when it is off.
+  """
+  def dedupe_window(nil), do: nil
+
+  def dedupe_window(window) when is_integer(window) and window in 1..@max_timer//1,
+    do: window
+
+  def dedupe_window(other) do
+    raise ArgumentError,
+          ":dedupe_window must be a number of milliseconds between 1 and #{@max_timer}, " <>
+            "got: #{inspect(other)}"
   end
 
   @doc """
@@ -346,10 +364,14 @@ defmodule Rollbax.Client do
   end
 
   defp emitted(%__MODULE__{enabled: true} = state, event) do
-    with {:ok, item} <- compose(state.draft, event, state.before_send),
+    with {:ok, event, state} <- deduplicate(state, event),
+         {:ok, item} <- compose(state.draft, event, state.before_send),
          {:ok, payload} <- Jason.encode_to_iodata(item) do
       post_or_enqueue(payload, state)
     else
+      {:duplicate, state} ->
+        state
+
       :drop ->
         state
 
@@ -414,6 +436,46 @@ defmodule Rollbax.Client do
   defp answered(%__MODULE__{}, _message), do: :unknown
 
   ## Helper functions
+
+  # Within the window, a report with the level and the body of one already sent is dropped
+  # and counted. The count leaves with the next such report that is sent.
+  defp deduplicate(%__MODULE__{dedupe_window: nil} = state, event), do: {:ok, event, state}
+
+  defp deduplicate(%__MODULE__{dedupe_window: window} = state, event) do
+    {level, _timestamp, body, _custom, _occurrence_data} = event
+    key = :erlang.md5(:erlang.term_to_binary({level, body}))
+    now = System.monotonic_time(:millisecond)
+
+    case state.recent do
+      %{^key => {expires_at, dropped}} when now < expires_at ->
+        {:duplicate, %{state | recent: Map.put(state.recent, key, {expires_at, dropped + 1})}}
+
+      %{^key => {_expires_at, dropped}} ->
+        {:ok, put_duplicates_dropped(event, dropped), remember(state, key, now + window, now)}
+
+      %{} ->
+        {:ok, event, remember(state, key, now + window, now)}
+    end
+  end
+
+  defp put_duplicates_dropped(event, 0), do: event
+
+  defp put_duplicates_dropped({level, timestamp, body, custom, occurrence_data}, dropped) do
+    {level, timestamp, body, Map.put(custom, "duplicates_dropped", dropped), occurrence_data}
+  end
+
+  # The reports remembered are bounded: once there are many, the ones whose window is over
+  # are forgotten.
+  defp remember(%__MODULE__{recent: recent} = state, key, expires_at, now) do
+    recent =
+      if map_size(recent) >= @max_recent do
+        Map.reject(recent, fn {_key, {expires_at, _dropped}} -> expires_at <= now end)
+      else
+        recent
+      end
+
+    %{state | recent: Map.put(recent, key, {expires_at, 0})}
+  end
 
   defp post_or_enqueue(payload, %__MODULE__{} = state) do
     cond do

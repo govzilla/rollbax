@@ -50,6 +50,12 @@ defmodule Rollbax do
       report right before it is sent, to redact it or to keep it from being sent. See
       "Redacting reports" below.
 
+    * `:dedupe_window` - (milliseconds) when set, a report with the same level and the same
+      exception or message as one sent less than that long ago is not sent. The next one
+      that is sent says how many were left out, in the `"duplicates_dropped"` custom value.
+      Reports that differ only in their custom or occurrence data count as the same. Off by
+      default.
+
     * `:flush_timeout` - (milliseconds) how long the reports still waiting or being posted
       are given to leave when the application stops. `0` stops at once. Defaults to `5_000`.
 
@@ -143,6 +149,7 @@ defmodule Rollbax do
     _before_send = Rollbax.Client.before_send(config[:before_send])
     _code_version = Rollbax.Client.code_version(config[:code_version])
     _flush_timeout = Rollbax.Client.flush_timeout(config[:flush_timeout])
+    _dedupe_window = Rollbax.Client.dedupe_window(config[:dedupe_window])
 
     children = [
       {Rollbax.Client, config}
@@ -182,7 +189,8 @@ defmodule Rollbax do
         :max_queue,
         :before_send,
         :code_version,
-        :flush_timeout
+        :flush_timeout,
+        :dedupe_window
       ])
       |> put_if_present(:environment, env[:environment])
       |> put_if_present(:access_token, env[:access_token])

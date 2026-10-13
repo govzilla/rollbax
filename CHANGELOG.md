@@ -9,6 +9,7 @@ This is the first release of Govzilla's fork.
 * **BREAKING CHANGE**: `Rollbax.Logger` is a `:logger` handler instead of an `:error_logger` handler. On current Erlang and Elixir the `:error_logger` handler received nothing, so crash reports were not being sent. Reporters now receive the `:logger` event in `c:Rollbax.Reporter.handle_event/2`, and `Rollbax.Reporter.Standard` reports every event that carries a `:crash_reason`.
 * **BREAKING CHANGE**: A crash report carries the logged message as the `"log"` custom value. From Elixir 1.19 on it also carries `"name"`, `"last_message"` and the like, each cut at 1,000 bytes. The state of a GenServer and the state and data of a state machine are no longer sent as values of their own; they are still part of `"log"` when the Logger level is `:debug`.
 * **BREAKING CHANGE**: Increased Elixir version requirement to 1.15 and higher.
+* Added `:dedupe_window`: within it, a report like one already sent is not sent again, and the next one sent carries the count of those left out.
 * When the application stops, the reports still waiting or being posted are given `:flush_timeout` (five seconds by default) to leave.
 * Added `:code_version`, sent with every report as the item's `code_version`.
 * Added `:before_send`, a callback that receives every report right before it is sent and returns it redacted, or `nil` to keep it from being sent.
