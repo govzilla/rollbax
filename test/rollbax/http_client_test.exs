@@ -104,7 +104,7 @@ defmodule Rollbax.HTTPClientTest do
         :ok = emit()
         assert_receive {:posted, task, _url, _headers, _body}
         monitor = Process.monitor(task)
-        assert_receive {:DOWN, ^monitor, :process, ^task, _reason}
+        assert_receive {:DOWN, ^monitor, :process, ^task, _reason}, 2_000
       end)
 
     assert log =~ "[error] (Rollbax) connection error: no answer in 100 ms"
@@ -318,7 +318,7 @@ defmodule Rollbax.HTTPClientTest do
       :ok = emit()
       assert_receive {:posted, task, _url, _headers, _body}
       monitor = Process.monitor(task)
-      assert_receive {:DOWN, ^monitor, :process, ^task, :killed}
+      assert_receive {:DOWN, ^monitor, :process, ^task, :killed}, 2_000
     end)
 
     {microseconds, _state} = :timer.tc(fn -> :sys.get_state(client) end)
