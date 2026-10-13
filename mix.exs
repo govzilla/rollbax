@@ -39,7 +39,7 @@ defmodule Rollbax.Mixfile do
       {:telemetry, "~> 1.0"},
       {:req, "~> 0.5", optional: true},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
-      {:plug, "~> 1.16", only: :test},
+      {:plug, "~> 1.14", optional: true},
       {:bandit, "~> 1.5", only: :test}
     ]
   end

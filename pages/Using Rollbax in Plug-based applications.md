@@ -1,96 +1,69 @@
 # Using Rollbax in Plug-based applications
 
-[Plug](https://github.com/elixir-lang/plug) provides the `Plug.ErrorHandler` plug which plays very well with Rollbax. As you can see in [the documentation for `Plug.ErrorHandler`](https://hexdocs.pm/plug/Plug.ErrorHandler.html), this plug can be used to "catch" exceptions that happen inside a given plug and act on them. This can be used to report all exceptions happening in that plug to Rollbar. For example:
+[Plug](https://github.com/elixir-plug/plug) provides the `Plug.ErrorHandler` plug, which "catches" the exceptions that happen inside a given plug so they can be acted on. `Rollbax.Plug.report/3` reports them to Rollbar together with the request they happened in:
 
 ```elixir
 defmodule MyApp.Router do
-  use Plug.Router # or `use MyApp.Web, :router` for Phoenix apps
+  use Plug.Router # or `use MyAppWeb, :router` in a Phoenix application
   use Plug.ErrorHandler
 
-  defp handle_errors(conn, %{kind: kind, reason: reason, stack: stacktrace}) do
-    Rollbax.report(kind, reason, stacktrace)
+  @impl Plug.ErrorHandler
+  def handle_errors(conn, error) do
+    Rollbax.Plug.report(conn, error)
+    send_resp(conn, conn.status, "Something went wrong")
   end
 end
 ```
 
-Rollbax also supports attaching *metadata* to a reported exception as well as overriding Rollbar data for a reported exception. Both these can be used to have more detailed reports. For example, in the code snippet above, we could report the request parameters as metadata to be attached to the exception:
+The report carries the method, the URL without its query string, the address of the client and the headers of the request.
+
+## Metadata
+
+`Rollbax.Plug.report/3` takes the custom data and the occurrence data `Rollbax.report/5` takes. For example, to show in Rollbar which user an error affected:
 
 ```elixir
-defp handle_errors(conn, %{kind: kind, reason: reason, stack: stacktrace}) do
-  Rollbax.report(kind, reason, stacktrace, %{method: conn.method})
+def handle_errors(conn, error) do
+  Rollbax.Plug.report(conn, error,
+    custom: %{"request_id" => Logger.metadata()[:request_id]},
+    occurrence_data: %{"person" => %{"id" => conn.assigns[:current_user_id]}}
+  )
+
+  send_resp(conn, conn.status, "Something went wrong")
 end
 ```
 
-Since Rollbar supports the concept of "request" and "server" in the [Item POST API](https://rollbar.com/docs/api/items_post/), a lot of data that Rollbar will be able to understand can be attached to a reported exceptions. These data is not referred as "custom data" but rather as **occurrence data**. To add data about the host, the request, and more that Rollbax understands pass them as the `occurrence_data` argument. For example:
-
-```elixir
-defp handle_errors(conn, %{kind: kind, reason: reason, stack: stacktrace}) do
-  conn =
-    conn
-    |> Plug.Conn.fetch_cookies()
-    |> Plug.Conn.fetch_query_params()
-
-  params =
-    case conn.params do
-      %Plug.Conn.Unfetched{aspect: :params} -> "unfetched"
-      other -> other
-    end
-
-  occurrence_data = %{
-    "request" => %{
-      "cookies" => conn.req_cookies,
-      "url" => Plug.Conn.request_url(conn),
-      "user_ip" => List.to_string(:inet.ntoa(conn.remote_ip)),
-      "headers" => Enum.into(conn.req_headers, %{}),
-      "method" => conn.method,
-      "params" => params,
-    },
-    "server" => %{
-      "pid" => System.get_env("MY_SERVER_PID"),
-      "host" => "#{System.get_env("MY_HOSTNAME")}:#{System.get_env("MY_PORT")}",
-      "root" => System.get_env("MY_APPLICATION_PATH"),
-    },
-  }
-
-  Rollbax.report(kind, reason, stacktrace, _custom_data = %{}, occurrence_data)
-end
-```
-
-Check the [documentation for the Rollbar API](https://rollbar.com/docs/api/items_post/) for all the supported values that can form a "request".
+Check the [documentation for the Rollbar API](https://docs.rollbar.com/reference/create-item) for everything an item can carry.
 
 ## Sensitive data
 
-In the examples above, *all* parameters are fetched from the connection and forwarded to Rollbar (in the `"params"` key); this means that any sensitive data such as passwords or authentication keys will be sent to Rollbar as well. A good idea may be to scrub any sensitive data out of the parameters before reporting errors to Rollbar. For example:
+A request is full of things that must not leave the application, so `Rollbax.Plug` sends little by default:
+
+  * the query string and the parameters are not sent. `query_string: true` and `params: true` turn them on;
+  * the `authorization`, `cookie`, `proxy-authorization`, `set-cookie` and `x-csrf-token` headers are never sent. `:filter_headers` takes more names to leave out.
+
+When the parameters are sent, scrub them first. The `:before_send` configuration (see `Rollbax`) receives every report right before it is sent and is the place to do it:
 
 ```elixir
-defp handle_errors(conn, error) do
-  conn =
-    conn
-    |> Plug.Conn.fetch_cookies()
-    |> Plug.Conn.fetch_query_params()
+config :rollbax, before_send: {MyApp.Rollbar, :scrub}
 
-  params = normalize_params(conn.params)
+defmodule MyApp.Rollbar do
+  def scrub(%{"request" => %{"params" => params}} = data) do
+    put_in(data, ["request", "params"], scrub_params(params))
+  end
 
-  # Same as the examples above
+  def scrub(data), do: data
+
+  defp scrub_params(%{} = params) do
+    Map.new(params, fn {key, value} ->
+      if is_binary(key) and String.contains?(key, ["password", "token"]) do
+        {key, "[FILTERED]"}
+      else
+        {key, scrub_params(value)}
+      end
+    end)
+  end
+
+  defp scrub_params([_ | _] = list), do: Enum.map(list, &scrub_params/1)
+  defp scrub_params(other), do: other
 end
-
-defp normalize_params(%Plug.Conn.Unfetched{aspect: :params}) do
-  "unfetched"
-end
-
-defp normalize_params(%{} = map) do
-  Enum.into(map, %{}, fn {key, value} ->
-    if is_binary(key) and String.contains?(key, ["password"]) do
-      {key, "[FILTERED]"}
-    else
-      {key, normalize_params(value)}
-    end
-  end)
-end
-
-defp normalize_params([_ | _] = list) do
-  Enum.map(list, &normalize_params/1)
-end
-
-defp normalize_params(other), do: other
 ```

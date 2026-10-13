@@ -58,7 +58,19 @@ Rollbax then adds a `:logger` handler that reports every logged event carrying a
 
 ### Plug and Phoenix
 
-For examples on how to take advantage of Rollbax in Plug-based applications (including Phoenix applications), have a look at the ["Using Rollbax in Plug-based applications" page in the documentation](http://hexdocs.pm/rollbax/using-rollbax-in-plug-based-applications.html).
+`Rollbax.Plug.report/3` reports an error caught by `Plug.ErrorHandler` together with the request it happened in:
+
+```elixir
+use Plug.ErrorHandler
+
+@impl Plug.ErrorHandler
+def handle_errors(conn, error) do
+  Rollbax.Plug.report(conn, error)
+  send_resp(conn, conn.status, "Something went wrong")
+end
+```
+
+See the "Using Rollbax in Plug-based applications" page in the documentation for what is sent and what is left out.
 
 ### Non-production reporting
 
