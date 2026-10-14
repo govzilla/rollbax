@@ -282,6 +282,10 @@ defmodule Rollbax.Client do
       remaining <= 0 ->
         state
 
+      # Without the supervisor of its tasks the client can post nothing more.
+      not Process.alive?(state.task_supervisor) ->
+        state
+
       map_size(state.in_flight) == 0 and state.waiting_count == 0 ->
         # Nothing is on its way: only a report still in the mailbox keeps the flush going.
         receive do

@@ -371,6 +371,26 @@ defmodule Rollbax.HTTPClientTest do
       assert log =~ ~r/\(Rollbax\) 4\d reports were not sent before the client stopped/
     end
 
+    test "it gives up at once when the supervisor of its tasks is gone" do
+      client = start_client([hold: true], max_concurrency: 1, flush_timeout: 5_000)
+
+      log =
+        ExUnit.CaptureIO.capture_io(:user, fn ->
+          :ok = emit()
+          :ok = emit()
+          assert_receive {:posted, _task, _url, _headers, _body}
+
+          %{task_supervisor: task_supervisor} = :sys.get_state(client)
+          monitor = Process.monitor(client)
+          Process.exit(task_supervisor, :kill)
+
+          assert_receive {:DOWN, ^monitor, :process, ^client, _reason}, 1_000
+          Logger.flush()
+        end)
+
+      assert log =~ "[error] (Rollbax) 2 reports were not sent before the client stopped"
+    end
+
     test "it does not wait when there is nothing left to send" do
       client = start_client([], flush_timeout: 5_000)
 
