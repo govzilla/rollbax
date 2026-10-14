@@ -9,9 +9,11 @@ defmodule Rollbax.HTTPClientTest do
     @behaviour Rollbax.HTTPClient
 
     # Tells the test what was posted and answers with what the test asked for. With
-    # `hold: true` the request stays open until the test sends `:answer`.
+    # `hold: true` the request stays open until the test sends `:answer`, and with
+    # `trap_exit: true` it outlives the supervisor of the tasks.
     @impl true
     def post(url, headers, body, options) do
+      if options[:trap_exit], do: Process.flag(:trap_exit, true)
       send(Keyword.fetch!(options, :test), {:posted, self(), url, headers, body})
 
       if options[:hold] do
@@ -302,6 +304,14 @@ defmodule Rollbax.HTTPClientTest do
       end
     end
 
+    defp await_waiting(client, attempts \\ 100) do
+      cond do
+        Process.info(client, :status) == {:status, :waiting} -> :ok
+        attempts == 0 -> flunk("the client did not start waiting")
+        true -> Process.sleep(10) && await_waiting(client, attempts - 1)
+      end
+    end
+
     test "the reports it holds are given the flush timeout to leave" do
       client = start_client([hold: true], max_concurrency: 1, flush_timeout: 2_000)
       :ok = emit()
@@ -372,23 +382,61 @@ defmodule Rollbax.HTTPClientTest do
     end
 
     test "it gives up at once when the supervisor of its tasks is gone" do
+      client =
+        start_client([hold: true, trap_exit: true], max_concurrency: 1, flush_timeout: 5_000)
+
+      log =
+        ExUnit.CaptureIO.capture_io(:user, fn ->
+          :ok = emit()
+          :ok = emit()
+          assert_receive {:posted, task, _url, _headers, _body}
+
+          %{task_supervisor: task_supervisor} = :sys.get_state(client)
+          client_monitor = Process.monitor(client)
+          task_monitor = Process.monitor(task)
+          Process.exit(task_supervisor, :kill)
+
+          assert_receive {:DOWN, ^client_monitor, :process, ^client, _reason}, 1_000
+          assert_receive {:DOWN, ^task_monitor, :process, ^task, :killed}
+          Logger.flush()
+        end)
+
+      assert log =~ "[error] (Rollbax) 2 reports were not sent before the client stopped"
+    end
+
+    test "it counts what it could not post when that supervisor dies while it flushes" do
       client = start_client([hold: true], max_concurrency: 1, flush_timeout: 5_000)
 
       log =
         ExUnit.CaptureIO.capture_io(:user, fn ->
           :ok = emit()
           :ok = emit()
-          assert_receive {:posted, _task, _url, _headers, _body}
+          assert_receive {:posted, task, _url, _headers, _body}
 
           %{task_supervisor: task_supervisor} = :sys.get_state(client)
-          monitor = Process.monitor(client)
-          Process.exit(task_supervisor, :kill)
+          client_monitor = Process.monitor(client)
+          spawn(fn -> GenServer.stop(client) end)
+          await_flushing(client)
+          await_waiting(client)
 
-          assert_receive {:DOWN, ^monitor, :process, ^client, _reason}, 1_000
+          # The client waits for an answer, past its look at the supervisor. It finds the
+          # task dead first, and the report that was waiting has no supervisor to go through.
+          :erlang.suspend_process(client)
+
+          for pid <- [task, task_supervisor] do
+            monitor = Process.monitor(pid)
+            Process.exit(pid, :kill)
+            assert_receive {:DOWN, ^monitor, :process, ^pid, _reason}
+          end
+
+          :erlang.resume_process(client)
+
+          assert_receive {:DOWN, ^client_monitor, :process, ^client, :normal}, 1_000
           Logger.flush()
         end)
 
-      assert log =~ "[error] (Rollbax) 2 reports were not sent before the client stopped"
+      assert log =~ "[error] (Rollbax) the task posting a report exited: :killed"
+      assert log =~ "[error] (Rollbax) 1 reports were not sent before the client stopped"
     end
 
     test "it does not wait when there is nothing left to send" do

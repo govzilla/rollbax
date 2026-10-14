@@ -453,16 +453,33 @@ defmodule Rollbax.Client do
   end
 
   defp post(payload, %__MODULE__{url: url, http_client: {module, options}} = state) do
-    task =
-      Task.Supervisor.async_nolink(state.task_supervisor, fn ->
-        Logger.metadata(rollbax: false)
-        request(module, url, payload, options)
-      end)
+    request = fn ->
+      Logger.metadata(rollbax: false)
+      request(module, url, payload, options)
+    end
 
-    deadline_timer =
-      Process.send_after(self(), {:request_deadline, task.ref}, state.report_timeout)
+    case start_task(state.task_supervisor, request) do
+      {:ok, task} ->
+        deadline_timer =
+          Process.send_after(self(), {:request_deadline, task.ref}, state.report_timeout)
 
-    %{state | in_flight: Map.put(state.in_flight, task.ref, {task.pid, deadline_timer})}
+        %{state | in_flight: Map.put(state.in_flight, task.ref, {task.pid, deadline_timer})}
+
+      :error ->
+        # The supervisor of the tasks is gone, and the client is about to stop with it. The
+        # report goes back to the front of the ones waiting, to be counted with them.
+        %{
+          state
+          | waiting: :queue.in_r(payload, state.waiting),
+            waiting_count: state.waiting_count + 1
+        }
+    end
+  end
+
+  defp start_task(task_supervisor, request) do
+    {:ok, Task.Supervisor.async_nolink(task_supervisor, request)}
+  catch
+    :exit, _reason -> :error
   end
 
   defp pop_in_flight(%__MODULE__{} = state, ref) do
