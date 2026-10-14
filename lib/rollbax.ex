@@ -53,9 +53,13 @@ defmodule Rollbax do
     * `:dedupe_window` - (milliseconds) when set, a report with the same level and the same
       exception or message as one sent less than that long ago is not sent. The next one
       that is sent says how many were left out, in the `"duplicates_dropped"` custom value.
-      Reports that differ only in their custom or occurrence data count as the same. About
-      a thousand distinct reports are remembered at a time; past that, one more is simply
-      sent again. Off by default.
+      Reports that differ only in their custom or occurrence data count as the same. At
+      most a thousand distinct reports are remembered at a time. When that many are, a new
+      report takes the place of the ones whose window is over and that left nothing out
+      or, when there is none, of the one whose window ended first, whose count of reports
+      left out is then lost. When no window is over the new report is not remembered, so
+      one like it is sent again. When Rollbar rate limits the project every window ends,
+      since the reports then waiting are discarded. Off by default.
 
     * `:flush_timeout` - (milliseconds) how long the reports still waiting or being posted
       are given to leave when the application stops. `0` stops at once. Defaults to `5_000`.

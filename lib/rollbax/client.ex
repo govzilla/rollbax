@@ -489,20 +489,34 @@ defmodule Rollbax.Client do
   end
 
   # The reports remembered are bounded. When there are too many, the ones whose window is
-  # over are forgotten: first those that carry no count, then, if that was not enough, the
-  # others, whose count is lost. It looks at every one of them, so at most once a second.
+  # over and that hold no count are forgotten. When there is none of those, the one whose
+  # window ended first is, and its count is lost. It looks at every one of them, so at most
+  # once a second.
   defp make_room(%__MODULE__{recent: recent} = state, key, now)
        when map_size(recent) >= @max_recent and not is_map_key(recent, key) and
               (state.recent_pruned_at == nil or
                  now - state.recent_pruned_at >= @prune_interval) do
-    expired = fn {_key, {expires_at, _dropped}} -> expires_at <= now end
+    expired =
+      for {key, {expires_at, dropped}} <- recent,
+          expires_at <= now,
+          do: {key, expires_at, dropped}
+
+    uncounted = for {key, _expires_at, 0} <- expired, do: key
 
     recent =
-      Map.reject(recent, fn {_key, {_expires_at, dropped}} = entry ->
-        expired.(entry) and dropped == 0
-      end)
+      case {uncounted, expired} do
+        {[_ | _], _expired} ->
+          Map.drop(recent, uncounted)
 
-    recent = if map_size(recent) >= @max_recent, do: Map.reject(recent, expired), else: recent
+        {[], [_ | _]} ->
+          {first_to_end, _expires_at, _dropped} =
+            Enum.min_by(expired, fn {_key, expires_at, _dropped} -> expires_at end)
+
+          Map.delete(recent, first_to_end)
+
+        {[], []} ->
+          recent
+      end
 
     %{state | recent: recent, recent_pruned_at: now}
   end
@@ -696,10 +710,26 @@ defmodule Rollbax.Client do
       cancel_rate_limit_timer(state.rate_limit_timer)
       timer_id = make_ref()
       timer = Process.send_after(self(), {:lift_rate_limiting, timer_id}, seconds * 1_000)
-      %{state | rate_limited?: true, rate_limit_timer: {timer_id, timer}}
+      end_windows(%{state | rate_limited?: true, rate_limit_timer: {timer_id, timer}})
     else
       _other -> state
     end
+  end
+
+  # From a rate limit on, the reports waiting are discarded, and so may be the one that was
+  # answered with it. None of them may keep a later one from being sent, so every window
+  # ends here; the counts stay for the next report that is sent.
+  defp end_windows(%__MODULE__{recent: recent} = state) when map_size(recent) == 0, do: state
+
+  defp end_windows(%__MODULE__{recent: recent} = state) do
+    now = System.monotonic_time(:millisecond)
+
+    recent =
+      Map.new(recent, fn {key, {expires_at, dropped}} ->
+        {key, {min(expires_at, now), dropped}}
+      end)
+
+    %{state | recent: recent}
   end
 
   defp cancel_rate_limit_timer({_timer_id, timer}), do: Process.cancel_timer(timer)

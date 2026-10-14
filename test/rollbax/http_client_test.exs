@@ -379,20 +379,37 @@ defmodule Rollbax.HTTPClientTest do
       assert map_size(:sys.get_state(client).recent) == 1_000
     end
 
-    test "when it must forget, forgets first what carries no count" do
-      client = start_client([], dedupe_window: 50)
+    # Ends every window and lets the client prune again, without waiting for either.
+    defp end_windows(client, dropped \\ nil) do
+      :sys.replace_state(client, fn state ->
+        past = System.monotonic_time(:millisecond) - 1
 
-      for n <- 1..1_000 do
+        recent =
+          Map.new(state.recent, fn {key, {_expires_at, count}} ->
+            {key, {past, dropped || count}}
+          end)
+
+        %{state | recent: recent, recent_pruned_at: nil}
+      end)
+    end
+
+    defp emit_distinct(client, range) do
+      for n <- range do
         body = %{"message" => %{"body" => "report #{n}"}}
         :ok = Client.emit(:error, System.system_time(:second), body, %{}, %{})
         if rem(n, 100) == 0, do: :sys.get_state(client)
       end
 
-      # One more like the first, within the window: it is left out and counted.
-      first = %{"message" => %{"body" => "report 1"}}
-      :ok = Client.emit(:error, System.system_time(:second), first, %{}, %{})
       :sys.get_state(client)
-      Process.sleep(80)
+    end
+
+    test "when it must forget, forgets first what carries no count" do
+      client = start_client([], dedupe_window: 60_000)
+
+      # Two like the first: the second is left out and counted.
+      emit_distinct(client, 1..1)
+      emit_distinct(client, 1..1_000)
+      end_windows(client)
 
       # Every window is over. A new report makes room; the counted one stays.
       :ok = emit()
@@ -400,6 +417,47 @@ defmodule Rollbax.HTTPClientTest do
 
       assert map_size(recent) == 2
       assert Enum.any?(recent, &match?({_key, {_expires_at, 1}}, &1))
+    end
+
+    test "when every one carries a count, forgets only the one it needs the place of" do
+      client = start_client([], dedupe_window: 60_000)
+
+      emit_distinct(client, 1..1_000)
+      end_windows(client, 3)
+
+      :ok = emit()
+      recent = :sys.get_state(client).recent
+
+      assert map_size(recent) == 1_000
+      assert Enum.count(recent, &match?({_key, {_expires_at, 3}}, &1)) == 999
+    end
+
+    test "a rate limit ends every window, since what was waiting is discarded" do
+      header = {"x-rate-limit-remaining-seconds", "0"}
+
+      client =
+        start_client([hold: true, answer: {:ok, 429, [header], "{}"}],
+          max_concurrency: 1,
+          dedupe_window: 60_000
+        )
+
+      waiting = %{"message" => %{"body" => "waiting when the rate limit came"}}
+
+      capture_log(fn ->
+        :ok = emit()
+        :ok = Client.emit(:error, System.system_time(:second), waiting, %{}, %{})
+        assert_receive {:posted, first, _url, _headers, _body}
+        send(first, :answer)
+        refute_receive {:posted, _task, _url, _headers, _body}
+        refute :sys.get_state(client).rate_limited?
+
+        :ok = Client.emit(:error, System.system_time(:second), waiting, %{}, %{})
+        assert_receive {:posted, second, _url, _headers, posted}
+        send(second, :answer)
+
+        assert posted |> IO.iodata_to_binary() |> Jason.decode!() |> get_in(["data", "body"]) ==
+                 waiting
+      end)
     end
 
     for value <- [0, -5, "60000", :infinity] do
