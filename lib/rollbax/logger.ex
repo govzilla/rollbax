@@ -26,7 +26,7 @@ defmodule Rollbax.Logger do
 
     * when the callback returns `:ignore`, the event is ignored and no more reporters are tried.
 
-  An event no reporter turns into an exception is not reported.
+  An event no reporter turns into an exception or a message is not reported.
 
   The list of reporters can be configured in the `:reporters` key in the `:rollbax` application
   configuration. By default this list only contains `Rollbax.Reporter.Standard` (see its
