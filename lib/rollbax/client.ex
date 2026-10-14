@@ -283,7 +283,7 @@ defmodule Rollbax.Client do
 
     # What did not leave in time is given up on: the tasks still posting are stopped, and
     # the reports nobody got to are counted with the rest.
-    Enum.each(state.in_flight, fn {_ref, {pid, _deadline_timer}} -> Process.exit(pid, :kill) end)
+    Enum.each(state.in_flight, fn {_ref, {pid, _timer, _carried}} -> Process.exit(pid, :kill) end)
     pending = map_size(state.in_flight) + state.waiting_count + discard_emitted(0)
 
     if pending > 0 do
@@ -335,7 +335,7 @@ defmodule Rollbax.Client do
   defp settle(%__MODULE__{} = state) do
     receive do
       {ref, response} when is_reference(ref) and is_map_key(state.in_flight, ref) ->
-        {:ok, state} = pop_in_flight(state, ref)
+        {:ok, _carried, state} = pop_in_flight(state, ref)
         Process.demonitor(ref, [:flush])
         state |> handle_response(response) |> settle()
     after
@@ -372,12 +372,13 @@ defmodule Rollbax.Client do
 
       {:new, key, dropped} ->
         event = put_duplicates_dropped(event, dropped)
+        carried = carried(key, dropped)
 
         with {:ok, item} <- compose(state.draft, event, state.before_send),
              {:ok, payload} <- Jason.encode_to_iodata(item),
-             {:accepted, state} <- post_or_enqueue(payload, state) do
+             {:accepted, state} <- post_or_enqueue({payload, carried}, state) do
           # Only a report on its way is one a later report can be a duplicate of.
-          remember(state, key)
+          remember(state, carried)
         else
           {:rejected, state} ->
             state
@@ -401,9 +402,11 @@ defmodule Rollbax.Client do
 
   defp answered(%__MODULE__{} = state, {ref, response}) when is_reference(ref) do
     case pop_in_flight(state, ref) do
-      {:ok, state} ->
+      {:ok, carried, state} ->
         Process.demonitor(ref, [:flush])
-        {:ok, state |> handle_response(response) |> post_waiting()}
+        state = handle_response(state, response)
+        state = if delivered?(response), do: state, else: not_delivered(state, carried)
+        {:ok, post_waiting(state)}
 
       :error ->
         {:ok, state}
@@ -412,9 +415,9 @@ defmodule Rollbax.Client do
 
   defp answered(%__MODULE__{} = state, {:DOWN, ref, :process, _pid, reason}) do
     case pop_in_flight(state, ref) do
-      {:ok, state} ->
+      {:ok, carried, state} ->
         Logger.error("(Rollbax) the task posting a report exited: #{inspect(reason)}")
-        {:ok, post_waiting(state)}
+        {:ok, state |> not_delivered(carried) |> post_waiting()}
 
       :error ->
         {:ok, state}
@@ -423,12 +426,13 @@ defmodule Rollbax.Client do
 
   defp answered(%__MODULE__{} = state, {:request_deadline, ref}) do
     case state.in_flight do
-      %{^ref => {pid, _deadline_timer}} ->
+      %{^ref => {pid, _deadline_timer, carried}} ->
         Logger.error("(Rollbax) connection error: no answer in #{state.report_timeout} ms")
         Process.demonitor(ref, [:flush])
         # Killed outright: waiting for the task to shut down would hold every other report.
         Process.exit(pid, :kill)
-        {:ok, post_waiting(%{state | in_flight: Map.delete(state.in_flight, ref)})}
+        state = %{state | in_flight: Map.delete(state.in_flight, ref)}
+        {:ok, state |> not_delivered(carried) |> post_waiting()}
 
       %{} ->
         {:ok, state}
@@ -457,10 +461,11 @@ defmodule Rollbax.Client do
     now = System.monotonic_time(:millisecond)
 
     case state.recent do
-      %{^key => {expires_at, dropped}} when now < expires_at ->
-        {:duplicate, %{state | recent: Map.put(state.recent, key, {expires_at, dropped + 1})}}
+      %{^key => {expires_at, dropped, attempt}} when now < expires_at ->
+        recent = Map.put(state.recent, key, {expires_at, dropped + 1, attempt})
+        {:duplicate, %{state | recent: recent}}
 
-      %{^key => {_expires_at, dropped}} ->
+      %{^key => {_expires_at, dropped, _attempt}} ->
         {:new, key, dropped}
 
       %{} ->
@@ -474,14 +479,42 @@ defmodule Rollbax.Client do
     {level, timestamp, body, Map.put(custom, "duplicates_dropped", dropped), occurrence_data}
   end
 
+  # What a report on its way holds of the deduplication: its key, the count it carries and
+  # what tells the window it opens from the ones other reports like it open.
+  defp carried(nil, _dropped), do: nil
+  defp carried(key, dropped), do: {key, dropped, make_ref()}
+
+  defp delivered?({:ok, status, _headers, _body}) when status in 200..299, do: true
+  defp delivered?(_response), do: false
+
+  # A report that did not reach Rollbar may not keep the next one like it from being sent,
+  # so its window ends, and the count it carried goes back to leave with that next one.
+  defp not_delivered(%__MODULE__{} = state, nil), do: state
+
+  defp not_delivered(%__MODULE__{recent: recent} = state, {key, carried, attempt}) do
+    case recent do
+      %{^key => {expires_at, dropped, ^attempt}} ->
+        now = System.monotonic_time(:millisecond)
+        entry = {min(expires_at, now), dropped + carried, attempt}
+        %{state | recent: Map.put(recent, key, entry)}
+
+      # The window is the one of a later report like it, which stands on its own.
+      %{^key => {expires_at, dropped, later}} ->
+        %{state | recent: Map.put(recent, key, {expires_at, dropped + carried, later})}
+
+      %{} ->
+        state
+    end
+  end
+
   defp remember(%__MODULE__{} = state, nil), do: state
 
-  defp remember(%__MODULE__{dedupe_window: window} = state, key) do
+  defp remember(%__MODULE__{dedupe_window: window} = state, {key, _carried, attempt}) do
     now = System.monotonic_time(:millisecond)
     state = make_room(state, key, now)
 
     if is_map_key(state.recent, key) or map_size(state.recent) < @max_recent do
-      %{state | recent: Map.put(state.recent, key, {now + window, 0})}
+      %{state | recent: Map.put(state.recent, key, {now + window, 0, attempt})}
     else
       # No room: this report is not remembered, so one like it will be sent again.
       state
@@ -497,7 +530,7 @@ defmodule Rollbax.Client do
               (state.recent_pruned_at == nil or
                  now - state.recent_pruned_at >= @prune_interval) do
     expired =
-      for {key, {expires_at, dropped}} <- recent,
+      for {key, {expires_at, dropped, _attempt}} <- recent,
           expires_at <= now,
           do: {key, expires_at, dropped}
 
@@ -523,16 +556,16 @@ defmodule Rollbax.Client do
 
   defp make_room(%__MODULE__{} = state, _key, _now), do: state
 
-  defp post_or_enqueue(payload, %__MODULE__{} = state) do
+  defp post_or_enqueue({_payload, _carried} = report, %__MODULE__{} = state) do
     cond do
       map_size(state.in_flight) < state.max_concurrency ->
-        {:accepted, post(payload, state)}
+        {:accepted, post(report, state)}
 
       state.waiting_count < state.max_queue ->
         {:accepted,
          %{
            state
-           | waiting: :queue.in(payload, state.waiting),
+           | waiting: :queue.in(report, state.waiting),
              waiting_count: state.waiting_count + 1
          }}
 
@@ -548,20 +581,28 @@ defmodule Rollbax.Client do
   defp post_waiting(%__MODULE__{rate_limited?: true, waiting_count: count} = state)
        when count > 0 do
     Logger.info("(Rollbax) ignored #{count} waiting reports due to rate limiting")
+
+    state =
+      state.waiting
+      |> :queue.to_list()
+      |> Enum.reduce(state, fn {_payload, carried}, state -> not_delivered(state, carried) end)
+
     %{state | waiting: :queue.new(), waiting_count: 0}
   end
 
   defp post_waiting(%__MODULE__{} = state) do
     case :queue.out(state.waiting) do
-      {{:value, payload}, waiting} ->
-        post(payload, %{state | waiting: waiting, waiting_count: state.waiting_count - 1})
+      {{:value, report}, waiting} ->
+        post(report, %{state | waiting: waiting, waiting_count: state.waiting_count - 1})
 
       {:empty, _waiting} ->
         state
     end
   end
 
-  defp post(payload, %__MODULE__{url: url, http_client: {module, options}} = state) do
+  defp post({payload, carried} = report, %__MODULE__{} = state) do
+    %__MODULE__{url: url, http_client: {module, options}} = state
+
     request = fn ->
       Logger.metadata(rollbax: false)
       request(module, url, payload, options)
@@ -572,14 +613,15 @@ defmodule Rollbax.Client do
         deadline_timer =
           Process.send_after(self(), {:request_deadline, task.ref}, state.report_timeout)
 
-        %{state | in_flight: Map.put(state.in_flight, task.ref, {task.pid, deadline_timer})}
+        in_flight = Map.put(state.in_flight, task.ref, {task.pid, deadline_timer, carried})
+        %{state | in_flight: in_flight}
 
       :error ->
         # The supervisor of the tasks is gone, and the client is about to stop with it. The
         # report goes back to the front of the ones waiting, to be counted with them.
         %{
           state
-          | waiting: :queue.in_r(payload, state.waiting),
+          | waiting: :queue.in_r(report, state.waiting),
             waiting_count: state.waiting_count + 1
         }
     end
@@ -593,9 +635,9 @@ defmodule Rollbax.Client do
 
   defp pop_in_flight(%__MODULE__{} = state, ref) do
     case Map.pop(state.in_flight, ref) do
-      {{_pid, deadline_timer}, in_flight} ->
+      {{_pid, deadline_timer, carried}, in_flight} ->
         _ = Process.cancel_timer(deadline_timer)
-        {:ok, %{state | in_flight: in_flight}}
+        {:ok, carried, %{state | in_flight: in_flight}}
 
       {nil, _in_flight} ->
         :error
@@ -710,26 +752,10 @@ defmodule Rollbax.Client do
       cancel_rate_limit_timer(state.rate_limit_timer)
       timer_id = make_ref()
       timer = Process.send_after(self(), {:lift_rate_limiting, timer_id}, seconds * 1_000)
-      end_windows(%{state | rate_limited?: true, rate_limit_timer: {timer_id, timer}})
+      %{state | rate_limited?: true, rate_limit_timer: {timer_id, timer}}
     else
       _other -> state
     end
-  end
-
-  # From a rate limit on, the reports waiting are discarded, and so may be the one that was
-  # answered with it. None of them may keep a later one from being sent, so every window
-  # ends here; the counts stay for the next report that is sent.
-  defp end_windows(%__MODULE__{recent: recent} = state) when map_size(recent) == 0, do: state
-
-  defp end_windows(%__MODULE__{recent: recent} = state) do
-    now = System.monotonic_time(:millisecond)
-
-    recent =
-      Map.new(recent, fn {key, {expires_at, dropped}} ->
-        {key, {min(expires_at, now), dropped}}
-      end)
-
-    %{state | recent: recent}
   end
 
   defp cancel_rate_limit_timer({_timer_id, timer}), do: Process.cancel_timer(timer)

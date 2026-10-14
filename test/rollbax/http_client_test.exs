@@ -385,8 +385,8 @@ defmodule Rollbax.HTTPClientTest do
         past = System.monotonic_time(:millisecond) - 1
 
         recent =
-          Map.new(state.recent, fn {key, {_expires_at, count}} ->
-            {key, {past, dropped || count}}
+          Map.new(state.recent, fn {key, {_expires_at, count, attempt}} ->
+            {key, {past, dropped || count, attempt}}
           end)
 
         %{state | recent: recent, recent_pruned_at: nil}
@@ -416,7 +416,7 @@ defmodule Rollbax.HTTPClientTest do
       recent = :sys.get_state(client).recent
 
       assert map_size(recent) == 2
-      assert Enum.any?(recent, &match?({_key, {_expires_at, 1}}, &1))
+      assert Enum.any?(recent, &match?({_key, {_expires_at, 1, _attempt}}, &1))
     end
 
     test "when every one carries a count, forgets only the one it needs the place of" do
@@ -429,10 +429,10 @@ defmodule Rollbax.HTTPClientTest do
       recent = :sys.get_state(client).recent
 
       assert map_size(recent) == 1_000
-      assert Enum.count(recent, &match?({_key, {_expires_at, 3}}, &1)) == 999
+      assert Enum.count(recent, &match?({_key, {_expires_at, 3, _attempt}}, &1)) == 999
     end
 
-    test "a rate limit ends every window, since what was waiting is discarded" do
+    test "a report a rate limit discarded does not keep the next one from being sent" do
       header = {"x-rate-limit-remaining-seconds", "0"}
 
       client =
@@ -442,21 +442,76 @@ defmodule Rollbax.HTTPClientTest do
         )
 
       waiting = %{"message" => %{"body" => "waiting when the rate limit came"}}
+      emit_waiting = fn -> Client.emit(:error, System.system_time(:second), waiting, %{}, %{}) end
+
+      # Every answer is a rate limit of no time at all: the report answered was not
+      # delivered, the ones waiting behind it are discarded, and reporting resumes.
+      answer_and_resume = fn task ->
+        send(task, :answer)
+        await_client_idle()
+
+        resumed? = fn _attempt ->
+          not :sys.get_state(client).rate_limited? or (Process.sleep(10) && false)
+        end
+
+        assert Enum.any?(1..100, resumed?)
+      end
 
       capture_log(fn ->
-        :ok = emit()
-        :ok = Client.emit(:error, System.system_time(:second), waiting, %{}, %{})
-        assert_receive {:posted, first, _url, _headers, _body}
-        send(first, :answer)
-        refute_receive {:posted, _task, _url, _headers, _body}
-        refute :sys.get_state(client).rate_limited?
+        # Three are left out for a report that is then not delivered.
+        :ok = emit_waiting.()
+        assert_receive {:posted, earlier, _url, _headers, _body}
+        Enum.each(1..3, fn _ -> :ok = emit_waiting.() end)
+        answer_and_resume.(earlier)
 
-        :ok = Client.emit(:error, System.system_time(:second), waiting, %{}, %{})
+        # The next one like it carries the count, and waits behind another report.
+        :ok = emit()
+        assert_receive {:posted, first, _url, _headers, _body}
+        :ok = emit_waiting.()
+        answer_and_resume.(first)
+        refute_receive {:posted, _task, _url, _headers, _body}
+
+        :ok = emit_waiting.()
         assert_receive {:posted, second, _url, _headers, posted}
         send(second, :answer)
 
-        assert posted |> IO.iodata_to_binary() |> Jason.decode!() |> get_in(["data", "body"]) ==
-                 waiting
+        assert %{"body" => ^waiting, "custom" => %{"duplicates_dropped" => 3}} =
+                 posted |> IO.iodata_to_binary() |> Jason.decode!() |> Map.fetch!("data")
+      end)
+    end
+
+    test "a report that was not delivered does not keep the next one from being sent" do
+      start_client([answer: {:error, :econnrefused}], dedupe_window: 60_000)
+
+      capture_log(fn ->
+        :ok = emit()
+        assert_receive {:posted, _task, _url, _headers, _body}
+        await_client_idle()
+
+        :ok = emit()
+        assert_receive {:posted, _task, _url, _headers, _body}
+      end)
+    end
+
+    test "the failure of an earlier report leaves the window of a later one like it" do
+      client = start_client([hold: true], max_concurrency: 2, dedupe_window: 60_000)
+
+      capture_log(fn ->
+        # The earlier one is still unanswered when its window ends and a later one is sent.
+        :ok = emit()
+        assert_receive {:posted, earlier, _url, _headers, _body}
+        end_windows(client)
+        :ok = emit()
+        assert_receive {:posted, later, _url, _headers, _body}
+        send(later, :answer)
+
+        monitor = Process.monitor(earlier)
+        Process.exit(earlier, :kill)
+        assert_receive {:DOWN, ^monitor, :process, ^earlier, :killed}
+        await_client_idle()
+
+        :ok = emit()
+        refute_receive {:posted, _task, _url, _headers, _body}
       end)
     end
 

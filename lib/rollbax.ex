@@ -58,8 +58,9 @@ defmodule Rollbax do
       report takes the place of the ones whose window is over and that left nothing out
       or, when there is none, of the one whose window ended first, whose count of reports
       left out is then lost. When no window is over the new report is not remembered, so
-      one like it is sent again. When Rollbar rate limits the project every window ends,
-      since the reports then waiting are discarded. Off by default.
+      one like it is sent again. A report that does not reach Rollbar, because the request
+      fails or is not answered in time or Rollbar rate limits the project, ends its window,
+      and the count it carried leaves with the next one sent. Off by default.
 
     * `:flush_timeout` - (milliseconds) how long the reports still waiting or being posted
       are given to leave when the application stops. `0` stops at once. Defaults to `5_000`.
