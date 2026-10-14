@@ -15,7 +15,7 @@ Add Rollbax as a dependency to your `mix.exs` file:
 ```elixir
 defp deps() do
   [
-    {:rollbax, github: "govzilla/rollbax"},
+    {:rollbax, github: "govzilla/rollbax", tag: "v0.12.0"},
     {:req, "~> 0.5"}
   ]
 end
@@ -44,7 +44,7 @@ rescue
 end
 ```
 
-For detailed information on configuration and usage, take a look at the [online documentation](http://hexdocs.pm/rollbax).
+For detailed information on configuration and usage, take a look at the documentation of the `Rollbax` module, which `mix docs` builds from this repository. The documentation on HexDocs is the one of ForzaElixir's 0.11.0.
 
 ### Crash reports
 
